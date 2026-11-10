@@ -1,0 +1,19 @@
+[package]
+name = "focmp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Flashes of Chaos multiplayer mod - in-game DLL (debug channel spike)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bitcode = { version = "0.6", features = ["derive"] }
+[target.'cfg(windows)'.dependencies]
+retour = "0.3"
+
+[profile.release]
+opt-level = 2
+debug = false
+panic = "unwind"  # GML throw/catch (YYGMLException) must unwind through our detours

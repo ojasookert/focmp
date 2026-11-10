@@ -1,0 +1,165 @@
+name: Build mod and installers
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mod:
+    name: Mod ZIP and manifest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-mingw-w64-x86-64
+          rustup show active-toolchain
+      - name: Set exact tagged release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ['RELEASE_TAG']
+          if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
+              raise SystemExit('Release tags must be vMAJOR.MINOR.PATCH')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'FOCMP_RELEASE_VERSION={tag[1:]}\n')
+          PY
+      - name: Build and package
+        run: |
+          scripts/build.sh
+          python3 scripts/package_release.py
+      - name: Upload installer input
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-bundle
+          path: dist/bundle/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload mod release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mod-release
+          path: |
+            dist/FOCMP-*.zip
+            dist/manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
+  installers:
+    name: Installer / ${{ matrix.os }}
+    needs: mod
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer-bundle
+          path: dist/bundle
+      - name: Prepare manifest
+        shell: bash
+        run: cp dist/bundle/manifest.json dist/manifest.json
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libx11-dev libxrandr-dev libxcursor-dev libxi-dev libgl1-mesa-dev libxkbcommon-dev libwayland-dev
+      - name: Build Linux installer
+        if: runner.os == 'Linux'
+        run: cargo build --locked --release --manifest-path installer/Cargo.toml
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked --release --manifest-path installer/Cargo.toml
+      - name: Check installer operations in temporary folders
+        shell: bash
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          python scripts/check_installer.py "installer/target/release/focmp-installer$suffix"
+      - name: Package installer
+        run: python scripts/package_installer.py
+      - name: Check AppImage without FUSE
+        if: runner.os == 'Linux'
+        run: dist/FOCMP-Installer-*-Linux-x86_64.AppImage --appimage-extract-and-run --version
+      - name: Upload installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-${{ runner.os }}
+          path: |
+            dist/FOCMP-Installer-*.exe
+            dist/FOCMP-Installer-*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mod, installers]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: '*release'
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installer-*
+          path: installers
+      - name: Publish mod ZIP, manifest, installers and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cp installers/installer-Linux/*.AppImage installers/installer-Windows/*.exe release/
+          cd release
+          sha256sum FOCMP-* manifest.json > SHA256SUMS.txt
+          python3 - > notes.txt <<'PY'
+          import json, os
+          m = json.load(open('manifest.json'))
+          v, repo = m['version'], os.environ['GH_REPO']
+          games = ' or '.join(f"**{g['name']}**" for g in m.get('game_versions', []))
+          if not games:
+              raise SystemExit('manifest.json has no game_versions')
+          print(f"""Three-player co-op for Flashes of Chaos, via Steam lobbies. For game version {games}; everyone in a lobby needs the same FOCMP version.
+
+          Unofficial and free. Brainburn Studio doesn't support or maintain it; report problems in [Issues](https://github.com/{repo}/issues).
+
+          **Install:** run the installer for your system and press Install. It works offline.
+          - Windows: `FOCMP-Installer-{v}-Windows-x86_64.exe`
+          - Linux / Steam Deck: `FOCMP-Installer-{v}-Linux-x86_64.AppImage`. Make it executable, and start the game once through Steam before installing.
+
+          `FOCMP-{v}.zip` holds just the DLLs and `focmp.ini`, for a manual install (see the [README](https://github.com/{repo}#readme)).
+          Experimental: joining mid-run, reconnecting and host migration aren't supported yet.""")
+          PY
+          gh release create "$RELEASE_TAG" FOCMP-* manifest.json SHA256SUMS.txt --verify-tag --title "FOCMP ${RELEASE_TAG#v}" --notes-file notes.txt
