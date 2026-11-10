@@ -6,14 +6,24 @@ use crate::{
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Vec2};
 use std::{path::PathBuf, sync::mpsc};
 pub fn run() -> Result<()> {
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("FOCMP Installer")
+        .with_inner_size([720.0, 680.0])
+        .with_min_inner_size([720.0, 600.0])
+        .with_window_type(egui::X11WindowType::Dialog)
+        .with_icon(icon());
+    // Wayland has no standalone dialog-type hint. Equal size constraints let
+    // Sway recognize this installer as a floating window without user rules.
+    #[cfg(target_os = "linux")]
+    let viewport = if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) {
+        viewport.with_resizable(false)
+    } else {
+        viewport
+    };
     eframe::run_native(
         "FOCMP Installer",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_title("FOCMP Installer")
-                .with_inner_size([720.0, 680.0])
-                .with_min_inner_size([720.0, 600.0])
-                .with_icon(icon()),
+            viewport,
             ..Default::default()
         },
         Box::new(|cc| {
