@@ -127,6 +127,7 @@ unsafe extern "C-unwind" fn draw(s: *mut c_void, o: *mut c_void) {
     }
 }
 unsafe extern "C-unwind" fn simple(s: *mut c_void, sp: i32, fr: f32, x: f32, y: f32) {
+    if super::cursors::hide_native_sprite(sp) { return; }
     if ACTIVE.load(Ordering::Relaxed) || GUN_ACTIVE.load(Ordering::Relaxed) {
         unsafe { sprite(s, sp, fr, x, y, 1.0, 1.0, 0.0, 0xffffff, 1.0) };
     } else {
@@ -135,6 +136,7 @@ unsafe extern "C-unwind" fn simple(s: *mut c_void, sp: i32, fr: f32, x: f32, y: 
     }
 }
 unsafe extern "C-unwind" fn sprite(s: *mut c_void, sp: i32, fr: f32, x: f32, y: f32, xs: f32, ys: f32, angle: f32, blend: u32, alpha: f32) {
+    if super::cursors::hide_native_sprite(sp) { return; }
     let f: Sprite = unsafe { std::mem::transmute(SPRITE.load(Ordering::Relaxed)) };
     if GUN_ACTIVE.load(Ordering::Relaxed) {
         if let Some(g)=G::new(){

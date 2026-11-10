@@ -46,3 +46,7 @@ You need Linux with Rustup, MinGW-w64 GCC and Python 3. Run `scripts/build.sh`, 
 ## License
 
 The mod and installer are MIT licensed (see [LICENSE](LICENSE)). Flashes of Chaos and its assets belong to Brainburn Studio, including the logo and art shown in `docs/header.webp`, `docs/installer.webp` and the installer's banner and icon. The installer loads that art from your Steam library cache or Steam's CDN rather than bundling it. The MULTIPLAYER lettering is the mod's own, made by `scripts/make_art.py`.
+
+## Donate
+
+FOCMP is free and always will be. If you'd like to support its development, you can buy me a coffee at https://ko-fi.com/ojasookert. Please note that donations go to the mod's development, not to Brainburn Studio.

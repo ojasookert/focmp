@@ -1,14 +1,25 @@
 //! Named cursors shared by card-selection menus, scoped to the current screen.
 use super::{Coop, colors, rooms};
-use crate::engine::{G, V, boolean, real, truthy};
+use crate::engine::{G, V, asset_id, boolean, real, truthy};
 use crate::net::{Msg, PeerId};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy)]
 struct Cursor { menu: u8, x: f64, y: f64, visible: bool, seen: Instant }
 #[derive(Default)]
 pub struct Cursors { peers: [Option<Cursor>; 3], sent: Option<Instant>, menu: u8 }
+
+static NATIVE_CURSOR: AtomicI32 = AtomicI32::new(-1);
+
+/// The native menu arrow is drawn as s_cursor, independently of cursor_sprite
+/// and the OS cursor. Suppress only that sprite while shared pointers replace it.
+pub fn hide_native_sprite(sprite: i32) -> bool {
+    sprite >= 0 && sprite == NATIVE_CURSOR.load(Ordering::Relaxed)
+        && rooms::RUN_SEED.load(Ordering::Relaxed) != 0
+        // Check the room at draw time too: it can change after the network tick.
+        && G::new().is_some_and(|g| screen(g).0 != 0)
+}
 
 fn screen(g: G) -> (u8, Option<V>) {
     match g.room_name().as_str() {
@@ -26,6 +37,7 @@ pub fn receive(c: &mut Coop, from: PeerId, run: u64, menu: u8, x: u16, y: u16, v
     }
 }
 pub fn tick(g: G, c: &mut Coop) {
+    NATIVE_CURSOR.store(-1, Ordering::Relaxed);
     let Some(n) = &c.net else { return };
     let run = rooms::RUN_SEED.load(Ordering::Relaxed);
     if run == 0 || !n.connected() { return; }
@@ -39,6 +51,7 @@ pub fn tick(g: G, c: &mut Coop) {
         c.cursors = Cursors::default();
         return;
     }
+    NATIVE_CURSOR.store(asset_id(g.asset("s_cursor")), Ordering::Relaxed);
     let mut x = g.call("device_mouse_x_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
     let mut y = g.call("device_mouse_y_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
     if let Some(inst) = inst {
