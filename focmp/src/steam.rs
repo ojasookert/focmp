@@ -12,8 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 const CHANNEL: i32 = 23673;
-const CHUNK: usize = 48 * 1024;
-const MAX: usize = 1 << 20;
+mod outbox;
+use outbox::{Outbox, Progress, CHUNK, MAX};
 #[repr(C)]
 struct Identity {
     kind: i32,
@@ -332,6 +332,7 @@ pub struct Steam {
     allowed: HashSet<u64>,
     partial: HashMap<(u64, u64), Partial>,
     seq: u64,
+    outboxes: HashMap<u64, Outbox>,
     my_id: PeerId,
     name: String,
     events: Vec<Event>,
@@ -383,6 +384,7 @@ impl Steam {
             allowed: HashSet::new(),
             partial: HashMap::new(),
             seq: 0,
+            outboxes: HashMap::new(),
             my_id: if role == Role::Host { 0 } else { 255 },
             name,
             events: vec![],
@@ -403,34 +405,54 @@ impl Steam {
         }
     }
     fn send(&mut self, to: u64, p: &Packet) {
-        let data = bitcode::encode(p);
-        if data.len() > MAX {
-            self.fail("Steam packet exceeds 1 MiB");
-            return;
-        }
+        if self.failed { return; }
         self.seq = self.seq.wrapping_add(1);
-        let count = data.len().div_ceil(CHUNK);
-        for (index, part) in data.chunks(CHUNK).enumerate() {
-            let mut bytes = b"FMP1".to_vec();
-            bytes.extend_from_slice(&self.seq.to_le_bytes());
-            bytes.extend_from_slice(&(index as u16).to_le_bytes());
-            bytes.extend_from_slice(&(count as u16).to_le_bytes());
-            bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(part);
-            let result = call!(
-                self.api,
+        let data = bitcode::encode(p);
+        let result = self.outboxes.entry(to).or_default().enqueue(
+            self.seq, data, replace_key(p), Instant::now(),
+        );
+        if let Err(e) = result { self.send_failed(to, e); }
+    }
+    fn send_failed(&mut self, to: u64, error: outbox::Error) {
+        let detail = match error {
+            outbox::Error::PacketSize(bytes) => format!("packet size {bytes} exceeds 1 MiB"),
+            outbox::Error::Capacity => "outgoing queue reached its bounded capacity".into(),
+            outbox::Error::Expired => "outgoing queue stalled for 15 seconds".into(),
+            outbox::Error::Send(result) => format!("send failed ({result})"),
+        };
+        let (bytes, packets) = self.outboxes.get(&to).map_or((0, 0), |q| (q.bytes(), q.len()));
+        let reason = format!("Steam {detail}; peer {to}, lobby {}, queued {bytes} bytes / {packets} packets", self.lobby);
+        crate::log(&reason);
+        self.outboxes.remove(&to);
+        self.partial.retain(|(sender, _), _| *sender != to);
+        if self.role == Role::Host {
+            // A slow/broken client must not tear down the host and healthy peer.
+            if let Some(peer) = self.peers.get(&to).copied() { self.disconnect(peer); }
+            else { self.api.close(to); }
+        } else { self.fail(reason); }
+    }
+    fn flush_sends(&mut self) {
+        let ids: Vec<_> = self.outboxes.keys().copied().collect();
+        let api = self.api;
+        let now = Instant::now();
+        for id in ids {
+            if self.failed { break; }
+            let Some(queue) = self.outboxes.get_mut(&id) else { continue };
+            let result = queue.flush(now, |bytes| call!(
+                api,
                 "SteamAPI_ISteamNetworkingMessages_SendMessageToUser",
                 unsafe extern "C" fn(usize, *const Identity, *const u8, u32, i32, i32) -> i32,
-                self.api.messages,
-                &Identity::new(to),
-                bytes.as_ptr(),
-                bytes.len() as u32,
-                8,
-                CHANNEL
-            );
-            if result != 1 {
-                self.fail(format!("Steam send failed ({result})"));
-                break;
+                api.messages, &Identity::new(id), bytes.as_ptr(), bytes.len() as u32, 8, CHANNEL
+            ));
+            match result {
+                Ok(Progress::Blocked) => crate::log(&format!(
+                    "Steam congestion: peer {id}, lobby {}, queued {} bytes / {} packets; retrying (25)",
+                    self.lobby, queue.bytes(), queue.len())),
+                Ok(Progress::Recovered) => crate::log(&format!(
+                    "Steam congestion recovered: peer {id}, retries {}, superseded snapshots {}",
+                    queue.retries, queue.replaced)),
+                Err(e) => self.send_failed(id, e),
+                _ => {}
             }
         }
     }
@@ -470,6 +492,8 @@ impl Steam {
             .iter()
             .find_map(|(id, p)| (*p == peer).then_some(*id))
         {
+            self.outboxes.remove(&id);
+            self.partial.retain(|(sender, _), _| *sender != id);
             self.peers.remove(&id);
             self.api.close(id);
             self.admission
@@ -686,6 +710,7 @@ impl Steam {
             for id in left {
                 self.disconnect(id);
             }
+            self.outboxes.retain(|id, _| allowed.contains(id));
             self.allowed = allowed;
             if self.role == Role::Client && self.my_id == 255 {
                 if self.started.elapsed() > Duration::from_secs(30) {
@@ -705,7 +730,7 @@ impl Steam {
                 }
             }
             self.partial
-                .retain(|_, p| p.time.elapsed() < Duration::from_secs(10));
+                .retain(|_, p| p.time.elapsed() < Duration::from_secs(30));
             let mut messages = [std::ptr::null_mut::<Message>(); 128];
             let count = call!(
                 self.api,
@@ -754,6 +779,7 @@ impl Steam {
                                     parts: vec![None; count],
                                 });
                             if entry.total == total && entry.parts.len() == count {
+                                entry.time = Instant::now();
                                 entry.parts[index] = Some(bytes[20..].to_vec());
                                 if entry.parts.iter().all(Option::is_some) {
                                     let entry = self.partial.remove(&(sender, id)).unwrap();
@@ -775,7 +801,27 @@ impl Steam {
                 );
             }
         }
+        if self.handle == 0 && !self.failed { self.flush_sends(); }
         std::mem::take(&mut self.events)
+    }
+}
+// Only complete, event-free snapshots may be superseded. Mixed Tick messages
+// carry hits, shot definitions, fires and enemy/prop deltas: never drop them.
+fn replace_key(packet: &Packet) -> Option<String> {
+    match packet {
+        Packet::Msg { from, msg: Msg::MenuCursor { run, menu, .. } } => Some(format!("cursor:{from}:{run}:{menu}")),
+        Packet::Msg { from, msg: Msg::Tick(t) }
+            if t.hits.is_empty() && t.fires.is_empty() && t.melee.is_empty()
+                && t.numbers.is_empty() && t.player_numbers.is_empty()
+                && t.enemies.is_none() && t.props.is_none() && t.objective.is_none()
+                && t.boss.is_none() && t.economy.is_none() && t.map_lights.is_none() =>
+        {
+            // In-run ticks always carry a run/stage-scoped shot batch, even
+            // when no shots fired. Keep room changes and non-run ticks intact.
+            t.projectiles.as_ref().filter(|b| b.definitions.is_empty() && b.fires.is_empty())
+                .map(|b| format!("pose:{from}:{}:{}:{}:{}:{}:{}", b.run, b.room, b.level, b.sub, t.room, t.busy))
+        }
+        _ => None,
     }
 }
 impl Drop for Steam {
