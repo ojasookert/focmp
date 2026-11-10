@@ -146,7 +146,7 @@ unsafe extern "C-unwind" fn factory(
         return ret;
     }
     let g = G::new();
-    let source = g.and_then(|g| unsafe { g.rt.builtin_var_of("id", s) });
+    let source = g.and_then(|g| unsafe { shot_source(g, s) });
     let remote = REPLAY.load(Ordering::Relaxed);
     // Native prop payloads belong to the host. Remote copies arrive through
     // this same factory with REPLAY set; do not emit another local explosion.
@@ -178,7 +178,11 @@ unsafe extern "C-unwind" fn factory(
             let local = g
                 .first("objPlayer")
                 .is_some_and(|p| key(&p) == key(&owner) || key(&p) == key(&gun));
-            let object = g.str_of(&g.call("object_get_name", &[g.get(gun, "object_index")]));
+            let object = if g.exists(gun) {
+                g.str_of(&g.call("object_get_name", &[g.get(gun, "object_index")]))
+            } else {
+                String::new()
+            };
             let descendant = crate::engine::is_struct(&g.get(gun, "shot"));
             let world =
                 object == "objMockGun" && !super::enemies::PUPPET_MODE.load(Ordering::Relaxed);
@@ -350,8 +354,20 @@ pub fn replay(g: G, s: *mut c_void) {
     }
     PENDING.lock().unwrap().extend(waiting);
 }
+/// create_shot can run from an instance or a bound struct (StickyThing's
+/// delayed callbacks). Check the native scope before reading instance-only
+/// builtins: a struct has no id/object_index, but owns its descendant shot.
+unsafe fn shot_source(g: G, scope: *mut c_void) -> Option<V> {
+    if scope.is_null() { return None; }
+    let value = V { v: scope as u64, flags: 0, kind: crate::gm::KIND_OBJECT };
+    if truthy(&g.call("is_struct", &[value])) {
+        Some(value)
+    } else {
+        unsafe { g.rt.builtin_var_of("id", scope) }.filter(|id| g.exists(*id))
+    }
+}
 pub fn visual(g: G, source: V) -> bool {
-    if !g.exists(source) {
+    if !g.exists(source) && !truthy(&g.call("is_struct", &[source])) {
         return false;
     }
     let shot = g.get(source, "shot");
