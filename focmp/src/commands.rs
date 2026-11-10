@@ -37,6 +37,10 @@ navigation:
   keys <key> <key> ...         several keys in sequence
   mouse <gx> <gy>              move the injected cursor (GUI coordinates)
   mouse off                    give the mouse back to the real device
+  pad on [slot] | off | state | neutral   virtual XInput controller (debug only)
+  pad press <button> [ms] | down/up <button>   a b x y lb rb ls rs start back up down left right
+  pad stick <left|right> <x> <y>    analog axes -1..1, right/down positive
+  pad trigger <left|right> <0..1>   analog trigger
   click <gx> <gy> [right]      click at GUI coordinates
   wait <ms>                    pause (for scripted sequences)
   focus force|normal           make window_has_focus() always true (drive a background instance)
@@ -298,7 +302,8 @@ const BUILTIN_VARS: &[&str] = &[
 fn dump_vars(rt: &Runtime, id: &RValue, max: usize) -> String {
     let mut s = String::new();
     let is_global = id.as_f64() == Some(-5.0);
-    if !is_global {
+    let is_struct = crate::engine::is_struct(id);
+    if !is_global && !is_struct {
         for v in BUILTIN_VARS {
             let r = unsafe { rt.call("variable_instance_get", &[*id, RValue::string(v)]) }.unwrap();
             let mut val = show(rt, &r, max);
@@ -310,7 +315,9 @@ fn dump_vars(rt: &Runtime, id: &RValue, max: usize) -> String {
             let _ = writeln!(s, "  {v:<24} {val}");
         }
     }
-    let names = unsafe { rt.call("variable_instance_get_names", &[*id]) }.unwrap();
+    let names_fn = if is_struct { "variable_struct_get_names" } else { "variable_instance_get_names" };
+    let get_fn = if is_struct { "variable_struct_get" } else { "variable_instance_get" };
+    let names = unsafe { rt.call(names_fn, &[*id]) }.unwrap();
     let len = real(rt, "array_length", &[names]);
     if len.is_nan() {
         let _ = writeln!(s, "  (variable_instance_get_names returned {})", show(rt, &names, 80));
@@ -320,7 +327,7 @@ fn dump_vars(rt: &Runtime, id: &RValue, max: usize) -> String {
         .map(|k| {
             let n = unsafe { rt.call("array_get", &[names, RValue::real(k as f64)]) }.unwrap();
             let name = unsafe { rt.to_string(&n) };
-            let val = unsafe { rt.call("variable_instance_get", &[*id, n]) }.unwrap();
+            let val = unsafe { rt.call(get_fn, &[*id, n]) }.unwrap();
             (name, show(rt, &val, max))
         })
         .collect();

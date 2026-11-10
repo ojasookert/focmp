@@ -19,6 +19,7 @@ mod engine;
 mod gm;
 mod hooks;
 mod input;
+mod gamepad_debug;
 mod net;
 mod steam;
 mod pe;
@@ -166,6 +167,7 @@ pub extern "C" fn focmp_init() {
             let _ = RUNTIME.set(rt);
             version::install();
             saves::install();
+            coop::controls::install();
         }
         Err(e) => log(&format!("runtime scan FAILED: {e} (console will run with limited commands)")),
     }

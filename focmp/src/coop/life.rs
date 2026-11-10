@@ -248,7 +248,7 @@ pub fn tick(g: G, c: &super::Coop) {
         .as_ref()
         .and_then(|(id, _)| living.iter().position(|x| x.0 == *id))
         .unwrap_or(0);
-    if truthy(&g.call("keyboard_check_pressed", &[real(9.0)])) {
+    if super::controls::inventory_pressed(g) {
         index = (index + 1) % living.len();
     }
     let (id, name, body) = &living[index];
@@ -278,6 +278,7 @@ unsafe extern "C-unwind" fn camera_hud(s: *mut c_void, o: *mut c_void) {
     let f: unsafe extern "C-unwind" fn(*mut c_void, *mut c_void) =
         unsafe { std::mem::transmute(CAMERA_HUD.load(Ordering::Relaxed)) };
     unsafe { f(s, o) };
+    if let Some(g)=G::new(){if let Ok(c)=super::COOP.try_lock(){unsafe { super::pedestal::draw_world_prompt(g,&c,s,o); }}}
     let Some(g) = G::new().filter(|g| {
         active()
             && !ending()
@@ -288,7 +289,7 @@ unsafe extern "C-unwind" fn camera_hud(s: *mut c_void, o: *mut c_void) {
     };
     let selected = SPECTATING.lock().unwrap().clone();
     let text = if let Some((_, name)) = selected {
-        format!("SPECTATING {name}  [TAB]\nRevive in the next room")
+        format!("SPECTATING {}  {}\nRevive in the next room", name.replace('[', "[["), super::controls::hint(g, 6))
     } else {
         "Waiting for the team".into()
     };
@@ -296,7 +297,7 @@ unsafe extern "C-unwind" fn camera_hud(s: *mut c_void, o: *mut c_void) {
     let align = g.call("draw_get_halign", &[]);
     g.call("draw_set_color", &[real(0xffffff as f64)]);
     g.call("draw_set_halign", &[real(1.0)]);
-    g.call("draw_text", &[real(320.0), real(324.0), g.s(&text)]);
+    unsafe { super::controls::draw_text(g, s, o, 320.0, 324.0, &text); }
     g.call("draw_set_color", &[color]);
     g.call("draw_set_halign", &[align]);
 }

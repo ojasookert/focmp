@@ -55,8 +55,7 @@ pub fn tick(g: G, c: &mut Coop) {
     let mut x = g.call("device_mouse_x_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
     let mut y = g.call("device_mouse_y_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
     if let Some(inst) = inst {
-        let inventory = g.get(inst, "oInventory");
-        if g.exists(inventory) && g.get(inventory, "cursor_active").as_f64() == Some(0.0) {
+        if g.global("cursor_active").as_f64() == Some(0.0) {
             let rows = g.get(inst, "rows");
             let i = g.num(inst, "sel_i");
             let row = if i >= 0.0 && i < g.arr_len(rows) as f64 { g.arr_get(rows, i as usize) } else { g.get(inst, "button") };

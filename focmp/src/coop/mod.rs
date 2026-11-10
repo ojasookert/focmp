@@ -4,6 +4,8 @@
 //! at most once per ~15 ms), so GML calls are safe.
 
 pub mod ai;
+pub(crate) mod controls;
+pub mod pedestal;
 pub mod colors;
 pub mod computer;
 pub mod cursors;
@@ -52,6 +54,7 @@ pub struct Remote {
 }
 
 pub struct Coop {
+    pub pedestal: pedestal::Pedestal,
     pub net: Option<Net>,
     pub status: String,
     pub remotes: HashMap<PeerId, Remote>,
@@ -78,6 +81,7 @@ pub struct Coop {
 
 pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
     Mutex::new(Coop {
+        pedestal: pedestal::Pedestal::default(),
         net: None,
         status: "offline".into(),
         remotes: HashMap::new(),
@@ -128,6 +132,7 @@ impl Coop {
 
     pub fn leave(&mut self, g: G) {
         props::reset();
+        self.pedestal.reset(g);
         let leave_world = self.net.as_ref().is_some_and(|n|n.role==Role::Client)
             && rooms::RUN_SEED.load(Ordering::Relaxed)!=0 && g.room_name()!="Room_main_menu";
         if self.net.take().is_some() {
@@ -195,6 +200,7 @@ impl Coop {
                 Event::Left(id) => {
                     if role == Role::Host {
                         economy::peer_left(g,id);
+                        pedestal::peer_left(g,self,id);
                         self.difficulty.member_left(id);
                         self.selection.member_left(id);
                     }
@@ -213,6 +219,7 @@ impl Coop {
                     });
                     r.seen = Instant::now();
                     match msg {
+                        Msg::Pedestal(packet) => pedestal::receive(g,self,from,packet),
                         Msg::PropInteract{committed,action} => props::receive_interact(g,self,from,committed,action),
                         Msg::PropHit{committed,hit} => props::receive(g,from,committed,hit),
                         Msg::Tick(t) => {
@@ -400,6 +407,7 @@ pub fn start_run_local(seed: u64) {
     rooms::RUN_SEED.store(seed, Ordering::Relaxed);
     crate::log(&format!("coop: run started, seed {seed:016x}"));
     if let Some(g) = G::new() {
+        pedestal::install(g);
         difficulty::install_hooks(g);
         selection::install_hooks(g);
         computer::install_hooks(g);
@@ -562,6 +570,7 @@ pub fn frame() {
     if rooms::RUN_SEED.load(Ordering::Relaxed)!=0 {visual_damage::ensure_player(g);}
     c.check_connections(g);
     economy::tick(g,&c);
+    pedestal::tick(g,&mut c);
     travel::tick(&mut c,g);
     c.send_lobby();
     difficulty::tick(g, &mut c);
@@ -621,6 +630,7 @@ pub fn console(args: &[String]) -> String {
     let mut c = COOP.lock().unwrap();
     match a.as_slice() {
         [] | ["status"] => status(&c),
+        ["pedestal", rest @ ..] => pedestal::console(g,&mut c,rest),
         ["host"] => {
             c.host(g, crate::net::DEFAULT_PORT);
             status(&c)

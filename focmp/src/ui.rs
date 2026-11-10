@@ -11,6 +11,7 @@ use std::time::Duration;
 pub fn run(cmd: &str, args: &[String]) -> Option<String> {
     Some(match cmd {
         "screen" => main(|rt| screen(rt)),
+        "pad" => crate::gamepad_debug::console(args),
         "menu" => match args.first().map(String::as_str) {
             None => main(|rt| match menu_items(rt) {
                 Ok(m) => format_menu(&m),
@@ -178,7 +179,7 @@ fn menu_items(rt: &'static Runtime) -> Result<Menu, String> {
         }
         remember(page);
         let title = rt.to_string(&struct_get(rt, page, "page_title"));
-        let selected = rt.to_string(&struct_get(rt, page, "item_sel"));
+        let selected = rt.to_string(&struct_get(rt, page, "i_infocus"));
         let items = struct_get(rt, page, "items");
         let n = real(rt, "array_length", &[items]);
         let mut out = Vec::new();
@@ -196,7 +197,7 @@ fn menu_items(rt: &'static Runtime) -> Result<Menu, String> {
 }
 
 fn format_menu(m: &Menu) -> String {
-    let mut out = format!("page {} \"{}\" (item_sel {})\n", m.page, m.title, m.selected);
+    let mut out = format!("page {} \"{}\" (focus {})\n", m.page, m.title, m.selected);
     for it in &m.items {
         let (x1, y1, x2, y2) = it.rect;
         let _ = writeln!(out, "  [{:2}] {:<28} GUI ({x1:.0},{y1:.0})-({x2:.0},{y2:.0})", it.i, it.text);

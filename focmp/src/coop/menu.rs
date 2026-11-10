@@ -202,6 +202,7 @@ pub fn tick(g: G, c: &mut Coop) {
         }
         crate::log("coop menu: COOP pages added to the main menu");
     }
+    super::controls::extend_menu(g, pages);
     let active = g.str_of(&g.get(g.global("page"), "active"));
     if active != c.menu.last_page {
         on_enter(g, c, &active);
@@ -532,7 +533,7 @@ fn rebind(g: G, st: V, map: &[(u64, V)], depth: u32) {
 }
 
 /// Bottom-aligned column layout used by the game's menus (29 px rows, last row at y 295).
-fn layout(g: G, items: V) {
+pub(super) fn layout(g: G, items: V) {
     let n = g.arr_len(items);
     for i in 0..n {
         let it = g.arr_get(items, i);
@@ -675,7 +676,7 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         let message = if !connected { "Leave this lobby to host or join another.".into() }
             else if host && waiting == 0 { "Everyone is ready. Start the run when you're ready.".into() }
             else if host { format!("Waiting for {waiting} player{} to ready up.", if waiting == 1 { "" } else { "s" }) }
-            else if c.net.as_ref().is_some_and(|n| c.ready[n.my_id as usize]) { "You're ready. Waiting for the host to start.".into() }
+            else if c.net.as_ref().is_some_and(|n| c.ready.get(n.my_id as usize).copied().unwrap_or(false)) { "You're ready. Waiting for the host to start.".into() }
             else { "Select Ready when you're ready to start a run.".into() };
         text(52.0, 248.0, c.menu.invite_error.as_deref().unwrap_or(&message), if waiting == 0 && connected { green } else { muted });
     }

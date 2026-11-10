@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const PROTOCOL: u32 = 28;
+pub const PROTOCOL: u32 = 29;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -91,6 +91,7 @@ impl PlayerState {
 
 #[derive(Encode, Decode, Clone, Debug)]
 pub enum Msg {
+    Pedestal(crate::coop::pedestal::Packet),
     PropInteract {committed:bool,action:crate::coop::props::Interact},
     PropHit { committed:bool, hit:crate::coop::props::Hit },
     /// Everything a peer has to say for one network tick (30 Hz), coalesced.
@@ -131,6 +132,7 @@ impl Msg {
     pub(crate) fn valid_from(&self, from: PeerId) -> bool {
         if from as usize >= MAX_PLAYERS { return false; }
         match self {
+            Self::Pedestal(packet) => packet.valid_from(from),
             Self::PropInteract{committed,action} => (!committed || from==0) && action.sane(),
             Self::PropHit{committed,hit} => (!committed || from==0) && hit.sane(),
             Self::ShotDefinitionRequest{run,owner,..}=>*run!=0&&(*owner as usize)<MAX_PLAYERS,
@@ -623,6 +625,9 @@ impl Net {
     }
 
     pub fn connected(&self) -> bool {
+        // A transport can become writable before the main thread consumes its
+        // welcome event. Until then my_id is the 255 sentinel, not a peer slot.
+        if self.my_id as usize >= MAX_PLAYERS { return false; }
         if let Some(steam)=&self.steam{return steam.lock().unwrap().connected();}
         self.role == Role::Host || !self.writers.lock().unwrap().is_empty()
     }
