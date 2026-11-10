@@ -39,17 +39,23 @@ impl Outbox {
     pub fn bytes(&self) -> usize { self.bytes }
     pub fn len(&self) -> usize { self.packets.len() }
     pub fn enqueue(&mut self, id: u64, data: Vec<u8>, replace: Option<String>, now: Instant) -> Result<(), Error> {
+        self.enqueue_with(id, data, replace, now, |_, new| Some(new.to_vec()))
+    }
+    pub fn enqueue_with(&mut self, id: u64, mut data: Vec<u8>, replace: Option<String>, now: Instant,
+        merge: impl FnOnce(&[u8], &[u8]) -> Option<Vec<u8>>) -> Result<(), Error> {
         if data.is_empty() || data.len() > MAX { return Err(Error::PacketSize(data.len())); }
-        // Only consecutive, entirely unsent snapshots in the same scope may
-        // replace one another. Never cross an event or a partially sent packet.
-        let old = self.packets.back().filter(|p| p.chunk == 0 && replace.is_some() && p.replace == replace);
+        // Never cross an event or a partially sent packet. Delta snapshots must
+        // be merged, not replaced: a stationary enemy may only occur in the old one.
+        let candidate = self.packets.back().filter(|p| p.chunk == 0 && replace.is_some() && p.replace == replace);
+        let merged = candidate.and_then(|p| merge(&p.data, &data)).filter(|v| !v.is_empty() && v.len() <= MAX);
+        let old = candidate.filter(|_| merged.is_some());
         let old_bytes = old.map_or(0, |p| p.data.len());
+        if let Some(merged) = merged { data = merged; }
         if self.bytes - old_bytes + data.len() > MAX_QUEUED_BYTES
             || (old.is_none() && self.packets.len() >= MAX_QUEUED_PACKETS) {
             return Err(Error::Capacity);
         }
-        // Keep the first enqueue time: replacing snapshots must not disguise
-        // a connection that has been unable to deliver anything for 15 seconds.
+        // Retain the first enqueue time so replacement cannot hide a stalled link.
         let queued = old.map_or(now, |p| p.queued);
         if old.is_some() {
             self.packets.pop_back();

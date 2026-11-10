@@ -409,7 +409,10 @@ impl Coop {
             return;
         }
         self.sent_gone = t.state.is_none();
-        net.broadcast(Msg::Tick(t));
+        let msg = Msg::Tick(t);
+        // Diagnose malformed host snapshots locally too: a client would reject
+        // the whole tick, leaving its authoritative world stale.
+        if msg.checked_from(net.my_id) { net.broadcast(msg); }
     }
 }
 

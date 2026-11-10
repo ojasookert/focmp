@@ -125,7 +125,11 @@ fn command(g:G,a:&[&str])->Result<V,String>{
             for e in g.instances("objEnemyMASTER") {
                 let row=object(g);g.call("array_push",&[enemies,row]);
                 g.set(row,"gid",g.get(e,"focmp_gid"));g.set(row,"object",g.call("object_get_name",&[g.get(e,"object_index")]));
-                for name in ["hp","dead","x","y","onfire","poisoned","frozen"]{g.set(row,name,g.get(e,name));}
+                for name in ["hp","dead","x","y","onfire","poisoned","frozen","visible","draw_enemy"]{g.set(row,name,g.get(e,name));}
+                let target=g.get(e,"Player");
+                if g.exists(target){for name in ["x","y","dead"]{g.set(row,&format!("target_{name}"),g.get(target,name));}}
+                let history=g.get(g.get(e,"fsm"),"__history");
+                if g.arr_len(history)>0{g.set(row,"state",g.arr_get(history,0));}
             }
         }
         _ if !active()=>return Err("call coop fuzz begin first (isolated QA instances only)".into()),

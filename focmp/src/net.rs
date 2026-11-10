@@ -40,7 +40,7 @@ impl AvatarPart {
     fn sane(&self)->bool{self.sprite.len()<128&&self.sprite.starts_with("s_")&&self.pass<8&&[self.frame,self.x,self.y,self.xs,self.ys,self.angle,self.alpha].iter().all(|x|x.is_finite()&&x.abs()<1.0e7)}
 }
 
-/// What a player looks like right now (sent ~30 Hz).
+/// What a player looks like right now (sent ~60 Hz).
 #[derive(Encode, Decode, Clone, Debug, Default, PartialEq)]
 pub struct PlayerState {
     pub avatar: Vec<AvatarPart>,
@@ -96,7 +96,7 @@ pub enum Msg {
     Pedestal(crate::coop::pedestal::Packet),
     PropInteract {committed:bool,action:crate::coop::props::Interact},
     PropHit { committed:bool, hit:crate::coop::props::Hit },
-    /// Everything a peer has to say for one network tick (30 Hz), coalesced.
+    /// Everything a peer has to say for one network tick (60 Hz), coalesced.
     Tick(Tick),
     ShotDefinitionRequest {run:u64,owner:PeerId,id:u64},
     ShotDefinition {run:u64,id:u64,graph:crate::coop::shot_graph::Graph},
@@ -131,6 +131,27 @@ pub enum Msg {
 }
 
 impl Msg {
+    /// Rejected ticks used to disappear silently, including all enemy updates
+    /// bundled with a bad field. Leave bounded diagnostics on either transport.
+    pub(crate) fn checked_from(&self, from: PeerId) -> bool {
+        if self.valid_from(from) { return true; }
+        static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = REJECTED.fetch_add(1, Ordering::Relaxed) + 1;
+        if count == 1 || count % 256 == 0 {
+            let detail = match self {
+                Self::Tick(t) => format!("tick room={} player={} shots={} props={} objective={} lights={} enemies={} hits={} fires={} melee={}",
+                    t.room, t.state.as_ref().is_none_or(PlayerState::sane),
+                    t.projectiles.as_ref().is_none_or(ShotBatch::sane),
+                    t.props.as_ref().is_none_or(|s| s.sane()), t.objective.as_ref().is_none_or(|s| s.sane()),
+                    t.map_lights.as_ref().is_none_or(|s| s.sane()),
+                    t.enemies.as_ref().map_or(0, |d| d.changed.len()), t.hits.len(), t.fires.len(), t.melee.len()),
+                _ => format!("message {:?}", std::mem::discriminant(self)),
+            };
+            crate::log(&format!("net: rejected invalid packet from peer {from} (total {count}): {detail}"));
+        }
+        false
+    }
+
     pub(crate) fn valid_from(&self, from: PeerId) -> bool {
         if from as usize >= MAX_PLAYERS { return false; }
         match self {
@@ -317,6 +338,21 @@ pub struct EnemyDelta {
     pub keyframe: bool,
     pub changed: Vec<EnemyQ>,
     pub gone: Vec<u16>,
+}
+
+impl EnemyDelta {
+    /// Compose consecutive unsent snapshots, retaining a full keyframe when
+    /// the older snapshot supplied it. Deaths are event barriers in the outbox.
+    pub(crate) fn merge_older(&mut self, older: Self) {
+        if self.keyframe { return; }
+        self.keyframe = older.keyframe;
+        let mut changed: std::collections::BTreeMap<_, _> = older.changed.into_iter().map(|q| (q.gid, q)).collect();
+        let mut gone: std::collections::BTreeSet<_> = older.gone.into_iter().collect();
+        for id in &self.gone { changed.remove(id); gone.insert(*id); }
+        for q in self.changed.drain(..) { gone.remove(&q.gid); changed.insert(q.gid, q); }
+        self.changed = changed.into_values().collect();
+        self.gone = gone.into_iter().collect();
+    }
 }
 
 /// Quantized enemy state (same game build on all peers, so asset ids are numeric).
@@ -558,7 +594,7 @@ impl Net {
                         match read_packet(&mut s) {
                             Ok(Packet::Joined(p)) => drop(ev_tx.send(Event::Joined(p))),
                             Ok(Packet::Left(id)) => drop(ev_tx.send(Event::Left(id))),
-                            Ok(Packet::Msg { from, msg }) if msg.valid_from(from) => {
+                            Ok(Packet::Msg { from, msg }) if msg.checked_from(from) => {
                                 if let Msg::StartRun { seed, .. } = &msg { crate::log(&format!("net: received run start {seed:016x} from peer {from}")); }
                                 if ev_tx.try_send(Event::Msg(from, msg)).is_err() { break; }
                             }
@@ -709,7 +745,7 @@ fn host_conn(
     let _ = ev_tx.send(Event::Joined(me.clone()));
     while !stop.load(Ordering::Relaxed) {
         match read_packet(&mut s) {
-            Ok(Packet::Msg { msg, .. }) if msg.valid_from(me.id) => {
+            Ok(Packet::Msg { msg, .. }) if msg.checked_from(me.id) => {
                 // Relay to other clients with the sender's real id (never trust `from`).
                 let frame = encode(&Packet::Msg { from: me.id, msg: msg.clone() });
                 let w = writers.lock().unwrap();

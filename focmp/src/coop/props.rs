@@ -83,6 +83,16 @@ pub struct Snapshot {
     gone: Vec<u32>,
 }
 impl Snapshot {
+    pub(crate) fn merge_older(&mut self, older: Self) -> bool {
+        if (self.run, &self.room, self.level, self.sub) != (older.run, &older.room, older.level, older.sub) { return false; }
+        let mut states: std::collections::BTreeMap<_, _> = older.states.into_iter().map(|s| (s.id, s)).collect();
+        let gone: std::collections::BTreeSet<_> = older.gone.into_iter().chain(self.gone.drain(..)).collect();
+        for s in self.states.drain(..) { states.insert(s.id, s); }
+        for id in &gone { states.remove(id); }
+        self.states = states.into_values().collect();
+        self.gone = gone.into_iter().collect();
+        true
+    }
     pub fn sane(&self) -> bool {
         self.run != 0
             && self.room.len() < 64

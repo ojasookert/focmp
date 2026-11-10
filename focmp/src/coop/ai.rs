@@ -40,8 +40,11 @@ static AGGRO: LazyLock<Mutex<HashMap<u64, (PeerId, Instant)>>> = LazyLock::new(|
 pub static ORIG_SET_DAMAGE: AtomicUsize = AtomicUsize::new(0);
 pub static TRACE_DAMAGE: AtomicBool = AtomicBool::new(false);
 static CHAINSAW_STEP: AtomicUsize = AtomicUsize::new(0);
+static DOG_STEP: AtomicUsize = AtomicUsize::new(0);
+static BOOM_STEP: AtomicUsize = AtomicUsize::new(0);
+static RIOT_STEP: AtomicUsize = AtomicUsize::new(0);
 static FIND_INSTANCE: AtomicUsize = AtomicUsize::new(0);
-static CHAINSAW_SELF: AtomicUsize = AtomicUsize::new(0);
+static CHASE_SELF: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Default)]
 pub struct Ai {
@@ -164,6 +167,12 @@ pub fn install_hooks(g: G) {
         (SET_DAMAGE, hk_set_damage as *const (), &ORIG_SET_DAMAGE),
         ("gml_Script_anon@1333@___struct___609@gml_Object_objEnemyMeleeBig_Create_0",
             chainsaw_step as *const (), &CHAINSAW_STEP),
+        ("gml_Script_anon@1369@___struct___588@gml_Object_objEnemyDog_Create_0",
+            dog_step as *const (), &DOG_STEP),
+        ("gml_Script_anon@1212@___struct___574@gml_Object_objEnemyBoom_Create_0",
+            boom_step as *const (), &BOOM_STEP),
+        ("gml_Script_anon@1062@___struct___610@gml_Object_objEnemyMeleeRiot_Create_0",
+            riot_step as *const (), &RIOT_STEP),
         ("instance_find", find_instance as *const (), &FIND_INSTANCE),
     ] {
         if slot.load(Ordering::Relaxed) == 0 {
@@ -175,23 +184,33 @@ pub fn install_hooks(g: G) {
     }
 }
 
-unsafe extern "C-unwind" fn chainsaw_step(s: *mut c_void, o: *mut c_void, r: *mut V, n: i32, a: *mut *mut V) -> *mut V {
-    let f: ScriptFn = unsafe { std::mem::transmute(CHAINSAW_STEP.load(Ordering::Relaxed)) };
-    let active = super::rooms::RUN_SEED.load(Ordering::Relaxed) != 0
-        && !super::enemies::PUPPET_MODE.load(Ordering::Relaxed);
-    let previous = CHAINSAW_SELF.swap(if active { s as usize } else { 0 }, Ordering::Relaxed);
-    let result = unsafe { f(s, o, r, n, a) };
-    CHAINSAW_SELF.store(previous, Ordering::Relaxed);
-    result
+// These four native chase states bypass self.Player with objPlayer[0]. Scope
+// the override to their calls only; wave spawning, menus and player code still
+// need the real local player. Restore the scope even if native code unwinds.
+struct ChaseScope(usize);
+impl Drop for ChaseScope {
+    fn drop(&mut self) { CHASE_SELF.store(self.0, Ordering::Relaxed); }
 }
+macro_rules! chase_hooks {
+    ($($hook:ident => $original:ident),* $(,)?) => {
+        $(unsafe extern "C-unwind" fn $hook(s: *mut c_void, o: *mut c_void, r: *mut V, n: i32, a: *mut *mut V) -> *mut V {
+            let f: ScriptFn = unsafe { std::mem::transmute($original.load(Ordering::Relaxed)) };
+            let active = super::rooms::RUN_SEED.load(Ordering::Relaxed) != 0
+                && !super::enemies::PUPPET_MODE.load(Ordering::Relaxed);
+            let _scope = ChaseScope(CHASE_SELF.swap(if active { s as usize } else { 0 }, Ordering::Relaxed));
+            unsafe { f(s, o, r, n, a) }
+        })*
+    };
+}
+chase_hooks! { chainsaw_step => CHAINSAW_STEP, dog_step => DOG_STEP, boom_step => BOOM_STEP, riot_step => RIOT_STEP }
 
 unsafe extern "C-unwind" fn find_instance(r: *mut V, s: *mut c_void, o: *mut c_void, n: i32, a: *mut V) {
-    let enemy = CHAINSAW_SELF.load(Ordering::Relaxed);
+    let enemy = CHASE_SELF.load(Ordering::Relaxed);
     if enemy != 0 && s as usize == enemy && n == 2 && !a.is_null()
         && unsafe { (*a.add(1)).as_f64() == Some(0.0) } {
         if let Some(g) = G::new() {
-            // This one chase routine looks up objPlayer[0] instead of using
-            // self.Player. Make its sight/raycast/attack decisions use the same
+            // These chase routines look up objPlayer[0] instead of using
+            // self.Player. Make their sight/raycast/attack decisions use the same
             // target as the rest of the enemy FSM, including a remote player.
             if key(&unsafe { *a }) == key(&g.asset("objPlayer")) {
                 if let Some(id) = unsafe { g.rt.builtin_var_of("id", enemy as *mut c_void) } {

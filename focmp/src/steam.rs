@@ -13,6 +13,7 @@ use std::{
 };
 const CHANNEL: i32 = 23673;
 mod outbox;
+mod snapshots;
 use outbox::{Outbox, Progress, CHUNK, MAX};
 #[repr(C)]
 struct Identity {
@@ -408,9 +409,14 @@ impl Steam {
         if self.failed { return; }
         self.seq = self.seq.wrapping_add(1);
         let data = bitcode::encode(p);
-        let result = self.outboxes.entry(to).or_default().enqueue(
-            self.seq, data, replace_key(p), Instant::now(),
-        );
+        let queue = self.outboxes.entry(to).or_default();
+        let now = Instant::now();
+        let replace = snapshots::key(p);
+        let result = if replace.is_some() {
+            queue.enqueue_with(self.seq, data, replace, now, snapshots::merge)
+        } else {
+            queue.enqueue(self.seq, data, None, now)
+        };
         if let Err(e) = result { self.send_failed(to, e); }
     }
     fn send_failed(&mut self, to: u64, error: outbox::Error) {
@@ -553,7 +559,7 @@ impl Steam {
                 }
                 Packet::Msg { msg, .. } => {
                     if let Some(&id) = self.peers.get(&sender) {
-                        if msg.valid_from(id) {
+                        if msg.checked_from(id) {
                             self.everyone(
                                 &Packet::Msg {
                                     from: id,
@@ -583,7 +589,7 @@ impl Steam {
                         peers,
                     });
                 }
-                Packet::Msg { from, msg } if msg.valid_from(from) => {
+                Packet::Msg { from, msg } if msg.checked_from(from) => {
                     self.events.push(Event::Msg(from, msg))
                 }
                 Packet::Joined(p) if (p.id as usize) < MAX_PLAYERS => {
@@ -803,25 +809,6 @@ impl Steam {
         }
         if self.handle == 0 && !self.failed { self.flush_sends(); }
         std::mem::take(&mut self.events)
-    }
-}
-// Only complete, event-free snapshots may be superseded. Mixed Tick messages
-// carry hits, shot definitions, fires and enemy/prop deltas: never drop them.
-fn replace_key(packet: &Packet) -> Option<String> {
-    match packet {
-        Packet::Msg { from, msg: Msg::MenuCursor { run, menu, .. } } => Some(format!("cursor:{from}:{run}:{menu}")),
-        Packet::Msg { from, msg: Msg::Tick(t) }
-            if t.hits.is_empty() && t.fires.is_empty() && t.melee.is_empty()
-                && t.numbers.is_empty() && t.player_numbers.is_empty()
-                && t.enemies.is_none() && t.props.is_none() && t.objective.is_none()
-                && t.boss.is_none() && t.economy.is_none() && t.map_lights.is_none() =>
-        {
-            // In-run ticks always carry a run/stage-scoped shot batch, even
-            // when no shots fired. Keep room changes and non-run ticks intact.
-            t.projectiles.as_ref().filter(|b| b.definitions.is_empty() && b.fires.is_empty())
-                .map(|b| format!("pose:{from}:{}:{}:{}:{}:{}:{}", b.run, b.room, b.level, b.sub, t.room, t.busy))
-        }
-        _ => None,
     }
 }
 impl Drop for Steam {
