@@ -348,7 +348,9 @@ fn build(g: G, pages: V) -> Result<(), String> {
             g.set(it, "x2", real(g.num(it, "x1") + 240.0));
         }
         g.set(page, "items", arr);
-        g.set(page, "len_items", real(items.len() as f64));
+        // len_items is a native method, rebound by clone_page. It reads the
+        // current items array; replacing it with a count corrupts later calls
+        // from objMenuText.Create (numeric values dispatch as function IDs).
         g.call("struct_set", &[pages, g.s(name), page]);
         Ok(())
     };
@@ -422,7 +424,6 @@ fn build(g: G, pages: V) -> Result<(), String> {
     let coop = item("coop", &Act::Open("page_coop"));
     g.call("array_insert", &[top_items, real(at as f64), coop]);
     layout(g, top_items);
-    g.set(top, "len_items", real((n + 1) as f64));
     Ok(())
 }
 
