@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 type Event = unsafe extern "C-unwind" fn(*mut c_void, *mut c_void);
 static CREATE: AtomicUsize = AtomicUsize::new(0);
+static STEP: AtomicUsize = AtomicUsize::new(0);
 static DESTROY: AtomicUsize = AtomicUsize::new(0);
 static MOUSE_POSITION: AtomicUsize = AtomicUsize::new(0);
 static DEACTIVATE: AtomicUsize = AtomicUsize::new(0);
@@ -37,6 +38,7 @@ pub fn install(g: G) {
     for (name, f, slot) in [
         ("gml_Object_objPause_Create_0", create as *const (), &CREATE),
         ("gml_Object_objPause_Destroy_0", destroy as *const (), &DESTROY),
+        ("gml_Object_objPause_Step_0", step as *const (), &STEP),
         ("gml_Script_get_mouse_pos_game", mouse_position as *const (), &MOUSE_POSITION),
         ("gml_Script_instance_deactivate_all_hook", deactivate as *const (), &DEACTIVATE),
         ("gml_Object_objPause_Draw_74", background as *const (), &BACKGROUND),
@@ -97,9 +99,51 @@ unsafe extern "C-unwind" fn create(s: *mut c_void, o: *mut c_void) {
                 if g.exists(bg) {
                     g.set(bg, "visible", boolean(false));
                 }
+                foreground_menu(g, menu);
                 crate::log("coop escape: opened native menu without deactivating the world");
             }
         }
+    }
+}
+// Pause and its page widgets draw into the same native UI surface as the live
+// HUD. Keep their original relative ordering, but in a foreground depth band.
+// The single-player game avoids this overlap by deactivating the world.
+fn foreground(g: G, instance: V) {
+    if !g.exists(instance) { return; }
+    let original = match g.get(instance, "focmp_pause_depth").as_f64() {
+        Some(depth) => depth,
+        None => {
+            let depth = g.num(instance, "depth");
+            g.set(instance, "focmp_pause_depth", real(depth));
+            depth
+        }
+    };
+    let depth = original - 1_000_000.0;
+    if g.num(instance, "depth") != depth { g.set(instance, "depth", real(depth)); }
+}
+fn foreground_menu(g: G, menu: V) {
+    foreground(g, menu);
+    let pages = g.get(menu, "pages");
+    if !crate::engine::is_struct(&pages) { return; }
+    super::controls::extend_menu(g, pages);
+    let active = g.str_of(&g.get(g.global("page"), "active"));
+    let page = g.get(pages, &active);
+    if !crate::engine::is_struct(&page) { return; }
+    let objects = g.get(page, "objects");
+    if !crate::engine::truthy(&g.call("is_array", &[objects])) { return; }
+    for i in 0..g.arr_len(objects) {
+        foreground(g, g.get(g.arr_get(objects, i), "instance"));
+    }
+}
+unsafe extern "C-unwind" fn step(s: *mut c_void, o: *mut c_void) {
+    let f: Event = unsafe { std::mem::transmute(STEP.load(Ordering::Relaxed)) };
+    let menu = G::new().filter(|_| multiplayer()).and_then(|g| {
+        unsafe { g.rt.builtin_var_of("id", s) }.map(|menu| (g, menu))
+    });
+    unsafe { f(s, o) };
+    // Continue/Stop can destroy this instance during the native Step.
+    if let Some((g, menu)) = menu.filter(|(g, menu)| g.exists(*menu)) {
+        foreground_menu(g, menu);
     }
 }
 unsafe extern "C-unwind" fn destroy(s: *mut c_void, o: *mut c_void) {
