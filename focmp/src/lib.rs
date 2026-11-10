@@ -1,10 +1,10 @@
 #![cfg(windows)]
 //! focmp.dll: in-game half of the Flashes of Chaos multiplayer mod.
 //!
-//! Current scope (spike): prove we're loaded, find the GameMaker runtime, and
-//! expose a line-based debug console on 127.0.0.1:47811 (FOCMP_DEBUG_PORT
-//! overrides) for inspecting game objects. Connect with `nc 127.0.0.1 47811`
-//! or `tools/focmp_console.py`.
+//! Current scope (spike): prove we're loaded, find the GameMaker runtime, and,
+//! when `[debug] console = true` in focmp.ini, expose a line-based debug console
+//! on 127.0.0.1:47811 (FOCMP_DEBUG_PORT picks the port) for inspecting game
+//! objects. Connect with `nc 127.0.0.1 47811` or `tools/focmp_console.py`.
 //!
 //! Threading: GameMaker is single-threaded. Every command that touches the
 //! runtime is queued and runs inside our `PeekMessageW` import hook, which the
@@ -180,7 +180,11 @@ pub extern "C" fn focmp_init() {
 
     input::install(&img);
 
-    std::thread::spawn(serve);
+    if config::load().debug_console {
+        std::thread::spawn(serve);
+    } else {
+        log("debug console off (enable with [debug] console = true in focmp.ini)");
+    }
 }
 
 fn serve() {

@@ -8,6 +8,7 @@ assert re.fullmatch(r'\d+\.\d+\.\d+',version)
 files={name:(root/'dist'/name).read_bytes() for name in ('version.dll','focmp.dll','focmp.ini')}
 assert version.encode() in files['focmp.dll'], 'Version counter and DLL differ: rebuild before packaging'
 assert b'transport = steam' in files['focmp.ini'], 'Release must default to Steam'
+assert b'console = false' in files['focmp.ini'], 'Release must keep the debug console off'
 protocol=re.search(r'pub const PROTOCOL: u32 = (\d+)',(root/'focmp/src/net.rs').read_text())[1]
 out=root/'dist'/f'FOCMP-{version}.zip'
 with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:

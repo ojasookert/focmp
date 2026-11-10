@@ -68,11 +68,15 @@ pub static RUN_RULES: Mutex<RunRules> = Mutex::new(RunRules {
 pub struct Config {
     pub transport: Transport,
     pub rules: RunRules,
+    /// The development console on 127.0.0.1 (`[debug] console = true`). Off by default: any local program, or a
+    /// web page posting to it, could run its commands.
+    pub debug_console: bool,
 }
 pub fn load() -> Config {
     let mut c = Config {
         transport: Transport::Tcp,
         rules: RunRules::default(),
+        debug_console: false,
     };
     let path = format!("{}focmp.ini", crate::win::exe_dir());
     let input = match std::fs::read_to_string(&path) {
@@ -102,6 +106,17 @@ pub fn load() -> Config {
                 }
                 "steam" => {
                     c.transport = Transport::Steam;
+                    true
+                }
+                _ => false,
+            },
+            ("debug", "console") => match value.to_ascii_lowercase().as_str() {
+                "true" | "1" | "on" | "yes" => {
+                    c.debug_console = true;
+                    true
+                }
+                "false" | "0" | "off" | "no" => {
+                    c.debug_console = false;
                     true
                 }
                 _ => false,
