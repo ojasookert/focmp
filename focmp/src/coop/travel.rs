@@ -161,6 +161,7 @@ unsafe extern "C-unwind" fn step(s: *mut c_void, o: *mut c_void) {
     if run() == 0 { unsafe { f(s, o) }; return; }
     let Some(g) = G::new() else { return };
     let Some(player) = (unsafe { g.rt.builtin_var_of("id", s) }) else { return };
+    super::boss_contact::apply(g,player,s,o);
     if super::life::before_step(g,s,o){return;}
     super::projectiles::replay(g, s);
     PLAYER_PTR.store(s as usize, Ordering::Relaxed);

@@ -36,7 +36,6 @@ If something goes wrong, [open an issue](https://github.com/ojasookert/focmp/iss
 ## Known issues
 
 - You can't join a run in progress, reconnect after dropping out, or take over when the host leaves.
-- Defend-area objectives aren't synced yet, so their progress can differ between players.
 - While the host is in the shop or lab, other players can't damage targets in the hub.
 - The ESC menu doesn't pause the game; the world keeps going for everyone.
 

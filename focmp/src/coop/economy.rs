@@ -36,10 +36,12 @@ const FIELDS: &[&str] = &[
 pub struct State {
     pub run: u64,
     pub values: Vec<f64>,
+    pub perk_factor: f64,
 }
 impl State {
     pub fn sane(&self) -> bool {
         self.run != 0
+            && self.perk_factor.is_finite() && (1.0..1e9).contains(&self.perk_factor)
             && self.values.len() == FIELDS.len()
             && self.values.iter().all(|x| x.is_finite() && x.abs() < 1e12)
     }
@@ -59,6 +61,7 @@ pub fn capture(g: G) -> Option<State> {
     let state = State {
         run: run(),
         values: FIELDS.iter().map(|f| g.num(p, f)).collect(),
+        perk_factor: g.first("objGameProgress").map(|p|g.num(p,"perk_reroll_factor")).unwrap_or(1.0),
     };
     state.sane().then_some(state)
 }
@@ -66,6 +69,7 @@ pub fn apply(g: G, state: State) {
     if state.run != run() || !state.sane() {
         return;
     }
+    if let Some(p)=g.first("objGameProgress") {g.set(p,"perk_reroll_factor",real(state.perk_factor));}
     if let Some(p) = points(g) {
         for (f, v) in FIELDS.iter().zip(state.values) {
             g.set(p, f, real(v));
@@ -89,13 +93,14 @@ struct Pending {
     level: u32,
     sub: u32,
     requested: bool,
-    post: Option<(V, f64, V, f64)>,
+    post: Option<(V, f64)>,
+    perk_reroll: bool,
 }
 static PENDING: LazyLock<Mutex<Option<Pending>>> = LazyLock::new(|| Mutex::new(None));
 // One request at a time per player. Reliable transport and monotonically increasing
 // IDs prevent repeated clicks/replayed packets from charging twice.
 static LAST: LazyLock<Mutex<[u64; 3]>> = LazyLock::new(|| Mutex::new([0; 3]));
-static RESERVED: LazyLock<Mutex<[Option<(u64, f64)>; 3]>> = LazyLock::new(|| Mutex::new([None; 3]));
+static RESERVED: LazyLock<Mutex<[Option<(u64, f64, bool)>; 3]>> = LazyLock::new(|| Mutex::new([None; 3]));
 fn charge(g: G, cost: f64) -> bool {
     let Some(p) = points(g) else { return false };
     let cash = g.num(p, "points");
@@ -146,6 +151,7 @@ fn queue(
         sub,
         requested: false,
         post: None,
+        perk_reroll: method == "reroll_perks",
     });
 }
 unsafe extern "C-unwind" fn reward(
@@ -315,8 +321,6 @@ unsafe extern "C-unwind" fn perk_step(s: *mut c_void, o: *mut c_void) {
             p.post = Some((
                 menu,
                 g.num(menu, "reroll_cost"),
-                progress,
-                g.num(progress, "perk_reroll_factor"),
             ));
         }
         g.set(menu, "reroll_cost", cost);
@@ -359,7 +363,7 @@ unsafe extern "C-unwind" fn spot_activate(
     unsafe { f(s, o, r, n, a) }
 }
 pub fn peer_left(g: G, peer: PeerId) {
-    if let Some((_, cost)) = RESERVED.lock().unwrap()[peer as usize].take() {
+    if let Some((_, cost, _)) = RESERVED.lock().unwrap()[peer as usize].take() {
         if let Some(p) = points(g) {
             g.set(p, "points", real(g.num(p, "points") + cost));
         }
@@ -436,6 +440,7 @@ pub fn receive(g: G, c: &super::Coop, from: PeerId, msg: Msg) {
             room,
             level,
             sub,
+            perk_reroll,
         } if r == run() && net.role == Role::Host => {
             let mut last = LAST.lock().unwrap();
             if id <= last[from as usize] {
@@ -447,11 +452,14 @@ pub fn receive(g: G, c: &super::Coop, from: PeerId, msg: Msg) {
                 && !c.travel.committed()
                 && (room == g.room_name()
                     || (room == "Room_shop" && g.room_name().starts_with("Room_hub"))
-                    || (room.starts_with("Room_hub") && g.room_name() == "Room_shop"))
+                    || (room.starts_with("Room_hub") && g.room_name() == "Room_shop")
+                    || (perk_reroll && room == "Room_select_perk_game"
+                        && (matches!(g.room_name().as_str(), "Room_shop" | "Room_new_unlocks")
+                            || g.room_name().starts_with("Room_hub"))))
                 && (level, sub) == super::rooms::level_sub(g)
                 && charge(g, cost);
             if ok {
-                reserved[from as usize] = Some((id, cost));
+                reserved[from as usize] = Some((id, cost, perk_reroll));
             }
             net.broadcast(Msg::PurchaseResult {
                 run: r,
@@ -501,9 +509,8 @@ pub fn receive(g: G, c: &super::Coop, from: PeerId, msg: Msg) {
                             };
                         }
                         EXECUTING.store(false, Ordering::Relaxed);
-                        if let Some((menu, cost, progress, factor)) = p.post {
+                        if let Some((menu, cost)) = p.post {
                             g.set(menu, "reroll_cost", real(cost));
-                            g.set(progress, "perk_reroll_factor", real(factor));
                             CHARGED.store(true, Ordering::Relaxed);
                         }
                         g.set(wallet, "points", real(cash));
@@ -526,9 +533,16 @@ pub fn receive(g: G, c: &super::Coop, from: PeerId, msg: Msg) {
             applied,
         } if r == run() && net.role == Role::Host => {
             let mut reserved = RESERVED.lock().unwrap();
-            if let Some((expected, cost)) = reserved[from as usize] {
+            if let Some((expected, cost, perk_reroll)) = reserved[from as usize] {
                 if id == expected {
                     reserved[from as usize] = None;
+                    if applied && perk_reroll {
+                        if let Some(progress)=g.first("objGameProgress") {
+                            // Native perk rerolls double this factor. Apply the
+                            // same operation once to the latest shared value.
+                            g.set(progress,"perk_reroll_factor",real(g.num(progress,"perk_reroll_factor")*2.0));
+                        }
+                    }
                     if !applied {
                         if let Some(p) = points(g) {
                             g.set(p, "points", real(g.num(p, "points") + cost));
@@ -556,6 +570,7 @@ pub fn tick(g: G, c: &super::Coop) {
                 room: p.room.clone(),
                 level: p.level,
                 sub: p.sub,
+                perk_reroll: p.perk_reroll,
             }
         })
     };

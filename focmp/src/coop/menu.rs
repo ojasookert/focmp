@@ -54,9 +54,6 @@ unsafe extern "C-unwind" fn menu_step(s: *mut c_void, o: *mut c_void) {
         if let Ok(mut c) = super::COOP.try_lock() {
             let instance = unsafe { g.rt.builtin_var_of("id", s) }.map(|v| crate::engine::key(&v));
             if instance != c.menu.instance {
-                if super::rooms::RUN_SEED.load(Ordering::Relaxed) != 0 && g.room_name() == "Room_main_menu" {
-                    c.leave(g);
-                }
                 super::enemies::PUPPET_MODE.store(false, Ordering::Relaxed);
                 c.menu.instance = instance;
                 c.menu.last_page.clear();
@@ -607,7 +604,11 @@ unsafe extern "C-unwind" fn hk_draw_page(s: *mut c_void, o: *mut c_void, ret: *m
         }
     }
     let f: ScriptFn = unsafe { std::mem::transmute(ORIG_DRAW.load(Ordering::Relaxed)) };
-    unsafe { f(s, o, ret, argc, args) }
+    let result=unsafe { f(s, o, ret, argc, args) };
+    if let Some(g)=G::new(){if let Ok(c)=super::COOP.try_lock(){
+        super::ending::draw(g,V{v:s as u64,flags:0,kind:crate::gm::KIND_OBJECT},&c);
+    }}
+    result
 }
 
 fn rgb(r: u32, g: u32, b: u32) -> f64 { (r | g << 8 | b << 16) as f64 }

@@ -98,6 +98,7 @@ fn apply(g: G, gh: &Ghost, s: &PlayerState) {
     // AI reads Player.Gun.mag_reloading when deciding whether to rush a
     // target. Keep the non-simulating anchor's native player interface valid.
     g.set(gh.body, "Gun", gh.gun);
+    if let Some(p)=g.first("objPlayer") {g.set(gh.body,"mask_index",g.get(p,"mask_index"));}
     g.set(gh.body, "dead", boolean(s.dead));
     g.set(gh.body, "hp", real(s.hp as f64));
     g.set(gh.body, "hp_max", real(s.hp_max as f64));

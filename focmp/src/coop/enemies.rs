@@ -192,6 +192,12 @@ skip_hooks!(GUN_SKIP, skip_gun, gun_skip_fns; 0 => gk0, 1 => gk1, 2 => gk2, 3 =>
 
 /// Host: an enemy gun fired → include it in the next tick.
 unsafe extern "C-unwind" fn hk_gun_fire(s: *mut c_void, o: *mut c_void, ret: *mut V, argc: i32, args: *mut *mut V) -> *mut V {
+    // Explicit console fixture: isolate contact from bullets without removing
+    // the gun or changing the enemy's native AI interface.
+    if super::fuzz::active() && G::new().is_some_and(|g| unsafe {g.rt.builtin_var_of("id",s)}
+        .is_some_and(|gun| truthy(&g.get(gun,"focmp_fuzz_no_fire")))) {
+        unsafe {*ret=V::undefined()};return ret;
+    }
     let f: crate::hooks::ScriptFn = unsafe { std::mem::transmute(ORIG_GUN_FIRE.load(Ordering::Relaxed)) };
     let shot = if !PUPPET_MODE.load(Ordering::Relaxed) && super::rooms::RUN_SEED.load(Ordering::Relaxed) != 0 {
         G::new().and_then(|g| {

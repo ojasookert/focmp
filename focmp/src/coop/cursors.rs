@@ -26,12 +26,13 @@ fn screen(g: G) -> (u8, Option<V>) {
         "Room_select_difficulty" => (1, g.first("objSelectDifficulty")),
         "Room_select_perk" => (2, g.first("objSelectPerk")),
         "Room_select_gun" => (3, g.first("objSelectGuns")),
+        "Room_game_end" => (4, None),
         _ => (0, None),
     }
 }
 pub fn receive(c: &mut Coop, from: PeerId, run: u64, menu: u8, x: u16, y: u16, visible: bool) {
     if run == rooms::RUN_SEED.load(Ordering::Relaxed) && run != 0 && (from as usize) < c.cursors.peers.len() {
-        c.cursors.peers[from as usize] = if (1..=3).contains(&menu) && visible {
+        c.cursors.peers[from as usize] = if (1..=4).contains(&menu) && visible {
             Some(Cursor { menu, x: x as f64, y: y as f64, visible, seen: Instant::now() })
         } else { None };
     }
@@ -54,6 +55,9 @@ pub fn tick(g: G, c: &mut Coop) {
     NATIVE_CURSOR.store(asset_id(g.asset("s_cursor")), Ordering::Relaxed);
     let mut x = g.call("device_mouse_x_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
     let mut y = g.call("device_mouse_y_to_gui", &[real(0.0)]).as_f64().unwrap_or(0.0);
+    if menu==4 && g.global("cursor_active").as_f64()==Some(0.0) {
+        if let Some((px,py))=super::ending::pointer(g){x=px;y=py;}
+    }
     if let Some(inst) = inst {
         if g.global("cursor_active").as_f64() == Some(0.0) {
             let rows = g.get(inst, "rows");

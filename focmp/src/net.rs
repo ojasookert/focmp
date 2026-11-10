@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const PROTOCOL: u32 = 29;
+pub const PROTOCOL: u32 = 30;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -91,6 +91,8 @@ impl PlayerState {
 
 #[derive(Encode, Decode, Clone, Debug)]
 pub enum Msg {
+    BossContact(crate::coop::boss_contact::Hit),
+    Ending(crate::coop::ending::Packet),
     Pedestal(crate::coop::pedestal::Packet),
     PropInteract {committed:bool,action:crate::coop::props::Interact},
     PropHit { committed:bool, hit:crate::coop::props::Hit },
@@ -98,7 +100,7 @@ pub enum Msg {
     Tick(Tick),
     ShotDefinitionRequest {run:u64,owner:PeerId,id:u64},
     ShotDefinition {run:u64,id:u64,graph:crate::coop::shot_graph::Graph},
-    PurchaseRequest {run:u64,id:u64,cost:f64,room:String,level:u32,sub:u32},
+    PurchaseRequest {run:u64,id:u64,cost:f64,room:String,level:u32,sub:u32,perk_reroll:bool},
     PurchaseResult {run:u64,peer:PeerId,id:u64,ok:bool},
     PurchaseDone {run:u64,id:u64,applied:bool},
     TeamGameOver { run:u64 },
@@ -132,6 +134,8 @@ impl Msg {
     pub(crate) fn valid_from(&self, from: PeerId) -> bool {
         if from as usize >= MAX_PLAYERS { return false; }
         match self {
+            Self::BossContact(hit) => from==0 && hit.sane(),
+            Self::Ending(p) => p.valid_from(from),
             Self::Pedestal(packet) => packet.valid_from(from),
             Self::PropInteract{committed,action} => (!committed || from==0) && action.sane(),
             Self::PropHit{committed,hit} => (!committed || from==0) && hit.sane(),
@@ -149,7 +153,7 @@ impl Msg {
             Self::DifficultyAgree { run, .. } => *run != 0,
             Self::DifficultyState { run, state } => from == 0 && *run != 0 && state.mask < 128 && state.allowed < 128 && state.mask & !state.allowed == 0,
             Self::DifficultyCommit { run, mask, .. } => from == 0 && *run != 0 && *mask < 128,
-            Self::MenuCursor { run, menu, x, y, .. } => *run != 0 && *menu <= 3 && *x <= 640 && *y <= 360,
+            Self::MenuCursor { run, menu, x, y, .. } => *run != 0 && *menu <= 4 && *x <= 640 && *y <= 360,
             Self::SelectionUpdate { run, stage, player } => *run != 0 && (1..=2).contains(stage) && player.sane_for(*stage),
             Self::SelectionState { run, state } => from == 0 && *run != 0 && (1..=2).contains(&state.stage) && state.players.iter().all(|p| p.sane_for(state.stage)),
             Self::SelectionAck { run, stage, .. } => *run != 0 && (1..=2).contains(stage),
@@ -158,7 +162,7 @@ impl Msg {
             Self::TravelCommit { run, room, door, .. } => from == 0 && *run != 0 && valid_room(room) && (-2..64).contains(door),
             Self::ComputerEntered { run, visit } | Self::ComputerRequest { run, visit, .. } => *run != 0 && *visit != 0,
             Self::ComputerAction { run, visit, revision, .. } => from == 0 && *run != 0 && *visit != 0 && *revision != 0,
-            Self::Tick(t) => t.props.as_ref().is_none_or(|s|from==0&&s.sane()) && valid_room(&t.room) && t.boss.as_ref().is_none_or(|b|from==0&&b.sane()) && t.economy.as_ref().is_none_or(|s|from==0&&s.sane()) && t.state.as_ref().is_none_or(PlayerState::sane)
+            Self::Tick(t) => t.objective.as_ref().is_none_or(|s|from==0&&s.sane()) && t.props.as_ref().is_none_or(|s|from==0&&s.sane()) && valid_room(&t.room) && t.boss.as_ref().is_none_or(|b|from==0&&b.sane()) && t.economy.as_ref().is_none_or(|s|from==0&&s.sane()) && t.state.as_ref().is_none_or(PlayerState::sane)
                 && t.projectiles.as_ref().is_none_or(ShotBatch::sane)
                 && t.hits.len() <= 4096 && t.fires.len() <= 4096
                 && t.fires.iter().all(EnemyFire::sane)
@@ -214,6 +218,7 @@ pub struct SelectionState {
 /// One network tick from one peer. Empty parts cost about a byte each.
 #[derive(Encode, Decode, Clone, Debug, Default)]
 pub struct Tick {
+    pub objective:Option<crate::coop::objective::Snapshot>,
     pub props:Option<crate::coop::props::Snapshot>,
     pub room:String,
     pub busy:bool,

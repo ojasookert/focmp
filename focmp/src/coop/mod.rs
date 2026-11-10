@@ -4,6 +4,9 @@
 //! at most once per ~15 ms), so GML calls are safe.
 
 pub mod ai;
+pub(crate) mod boss_contact;
+pub(crate) mod objective;
+pub(crate) mod ending;
 pub(crate) mod controls;
 pub mod pedestal;
 pub mod colors;
@@ -54,6 +57,7 @@ pub struct Remote {
 }
 
 pub struct Coop {
+    pub ending: ending::Ending,
     pub pedestal: pedestal::Pedestal,
     pub net: Option<Net>,
     pub status: String,
@@ -81,6 +85,7 @@ pub struct Coop {
 
 pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
     Mutex::new(Coop {
+        ending: ending::Ending::default(),
         pedestal: pedestal::Pedestal::default(),
         net: None,
         status: "offline".into(),
@@ -131,6 +136,8 @@ impl Coop {
     }
 
     pub fn leave(&mut self, g: G) {
+        self.ending = ending::Ending::default();
+        boss_contact::reset();
         props::reset();
         self.pedestal.reset(g);
         let leave_world = self.net.as_ref().is_some_and(|n|n.role==Role::Client)
@@ -162,6 +169,8 @@ impl Coop {
         self.lobby_sent = None;
         self.heartbeat_sent = None;
         self.sent_gone = false;
+        self.room = g.room_name();
+        self.room_frames = 0;
         MY_ID.store(0, Ordering::Relaxed);
     }
 
@@ -203,6 +212,7 @@ impl Coop {
                         pedestal::peer_left(g,self,id);
                         self.difficulty.member_left(id);
                         self.selection.member_left(id);
+                        self.ending.member_left(id);
                     }
                     self.ready[id as usize] = false;
                     self.lobby_sent = None;
@@ -219,12 +229,14 @@ impl Coop {
                     });
                     r.seen = Instant::now();
                     match msg {
+                        Msg::BossContact(hit) => boss_contact::receive(g,from,hit),
+                        Msg::Ending(p) => ending::receive(g,self,from,p),
                         Msg::Pedestal(packet) => pedestal::receive(g,self,from,packet),
                         Msg::PropInteract{committed,action} => props::receive_interact(g,self,from,committed,action),
                         Msg::PropHit{committed,hit} => props::receive(g,from,committed,hit),
                         Msg::Tick(t) => {
                             r.room=t.room.clone();r.busy=t.busy;
-                            if from==0 {if let Some(s)=t.props {props::apply(g,s);} if let Some(b)=t.boss{rooms::apply_boss(g,b);}if let Some(state)=t.economy {economy::apply(g,state);}}
+                            if from==0 {if let Some(s)=t.objective {objective::apply(g,s);} if let Some(s)=t.props {props::apply(g,s);} if let Some(b)=t.boss{rooms::apply_boss(g,b);}if let Some(state)=t.economy {economy::apply(g,state);}}
                             if let Some(d) = t.projectiles { self.projectiles.receive(g, from, d); }
                             match t.state {
                                 Some(st) if st.sane() => r.state = Some(st),
@@ -300,12 +312,13 @@ impl Coop {
                     break;
                 }
                 Event::Closed => {
+                    let extracted = self.ending.extracting();
                     // The host can reach its native end screen one frame before
                     // a client executes TeamGameOver. Preserve that committed
                     // action until Player.Step runs; returning to the menu will
                     // perform the normal cleanup on the following frame.
-                    if !life::ending() { self.leave(g); }
-                    self.status = "disconnected (host closed)".into();
+                    if !life::ending() && !self.ending.pending() { self.leave(g); }
+                    self.status = if extracted { "offline" } else { "disconnected (host closed)" }.into();
                     crate::log("coop: connection closed");
                     break;
                 }
@@ -382,7 +395,7 @@ impl Coop {
         let in_run = rooms::RUN_SEED.load(Ordering::Relaxed) != 0;
         let mut t = Tick { room:g.room_name(),busy:economy::busy(g),state: capture_local(g), projectiles: in_run.then(|| self.projectiles.capture(g)), ..Default::default() };
         t.player_numbers=std::mem::take(&mut *damage_numbers::PLAYER_OUTGOING.lock().unwrap());
-        if in_run && net.role==Role::Host {t.props=props::capture(g);t.map_lights=map_lights::capture(g);t.economy=economy::capture(g);t.boss=rooms::capture_boss(g);}
+        if in_run && net.role==Role::Host {t.objective=objective::capture(g);t.props=props::capture(g);t.map_lights=map_lights::capture(g);t.economy=economy::capture(g);t.boss=rooms::capture_boss(g);}
         if net.role == Role::Client {
             t.hits = std::mem::take(&mut *enemies::HITS.lock().unwrap());
         } else if in_run && g.first("objPlayer").is_some() {
@@ -404,6 +417,7 @@ impl Coop {
 /// the player to the game's own run setup (PLAY page → run).
 pub fn start_run_local(seed: u64) {
     props::reset();
+    boss_contact::reset();
     rooms::RUN_SEED.store(seed, Ordering::Relaxed);
     crate::log(&format!("coop: run started, seed {seed:016x}"));
     if let Some(g) = G::new() {
@@ -413,6 +427,9 @@ pub fn start_run_local(seed: u64) {
         computer::install_hooks(g);
         travel::install_hooks(g);
         enemy_melee::install(g);
+        boss_contact::install(g);
+        objective::install(g);
+        ending::install(g);
         damage_numbers::install(g);
         map_lights::install(g);
         projectiles::install_hooks(g);
@@ -555,6 +572,10 @@ pub fn frame() {
         return;
     }
     let mut c = COOP.lock().unwrap();
+    // Native objMenu may persist across rooms: cleanup must follow the room
+    // transition, not a change of menu instance identity.
+    if rooms::RUN_SEED.load(Ordering::Relaxed)!=0 && g.room_name()=="Room_main_menu"
+        && !c.room.is_empty() && c.room!="Room_main_menu" && !c.ending.extracting() {c.leave(g);}
     // Discard old-room puppets and queued attacks before consuming new packets.
     if g.room_name() != c.room {
         c.enemies.reset();
@@ -570,6 +591,8 @@ pub fn frame() {
     if rooms::RUN_SEED.load(Ordering::Relaxed)!=0 {visual_damage::ensure_player(g);}
     c.check_connections(g);
     economy::tick(g,&c);
+    boss_contact::tick(g,&c);
+    ending::tick(g,&mut c);
     pedestal::tick(g,&mut c);
     travel::tick(&mut c,g);
     c.send_lobby();
@@ -671,13 +694,23 @@ pub fn console(args: &[String]) -> String {
             format!("players {} enemy health {:.3}x enemy damage {:.3}x",r.players,r.health_scale(),r.damage_scale())
         },
         // Test: report a hit on enemy `gid` exactly like a real client hit would.
-        ["testhit", gid, amount] => match (gid.parse::<u32>(), amount.parse::<f32>()) {
-            (Ok(gid), Ok(amount)) => {
+        ["testhit", gid, amount] | ["testhit", gid, amount, _] => match (gid.parse::<u16>(), amount.parse::<f64>(), a.get(3).unwrap_or(&"1").parse::<u8>()) {
+            (Ok(gid), Ok(amount), Ok(dtype)) if dtype < 16 => {
                 let (level,sub)=rooms::level_sub(g);
-                enemies::HITS.lock().unwrap().push(crate::net::EnemyHit{gid:gid as u16,room:g.room_name(),level,sub,amount:amount as f64,x:0.0,y:0.0,kx:0.0,ky:0.0,dtype:1,scale:1.0,flag:true,extra:None});
-                format!("queued test hit: enemy {gid} -{amount}")
+                let hit=crate::net::EnemyHit{gid,room:g.room_name(),level,sub,amount,x:0.0,y:0.0,kx:0.0,ky:0.0,dtype,scale:1.0,flag:true,extra:None};
+                if !hit.sane() || rooms::RUN_SEED.load(Ordering::Relaxed)==0 || c.net.is_none() {
+                    return "test hit requires a running session, nonzero enemy ID and finite damage below 1000000".into();
+                }
+                // Execute inside Enemy.Step even for host-side diagnostics. A
+                // direct console method_call lacks the native damage context.
+                if c.net.as_ref().is_some_and(|n|n.role==Role::Host) {
+                    enemies::PENDING_DMG.lock().unwrap().entry(gid).or_default().push((0,hit));
+                } else {
+                    enemies::HITS.lock().unwrap().push(hit);
+                }
+                format!("queued test hit: enemy {gid} -{amount} type {dtype}")
             }
-            _ => "usage: coop testhit <gid> <amount>".into(),
+            _ => "usage: coop testhit <gid> <amount> [damage type 0..15]".into(),
         },
         ["ready"] => { c.toggle_ready(); status(&c) }
         ["start"] => host_start_run(&mut c, true),
