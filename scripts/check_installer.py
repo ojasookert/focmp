@@ -28,7 +28,22 @@ with tempfile.TemporaryDirectory(prefix='focmp-installer-check-') as tmp:
  run();(game/'focmp.ini').write_bytes(settings);run('uninstall');assert (game/'focmp.ini').read_bytes()==settings
  run();installed=(game/'focmp.dll').read_bytes();(game/'focmp.dll').write_bytes(b'external modification')
  run('uninstall',ok=False);run(ok=False);assert (game/'focmp.dll').read_bytes()==b'external modification'
- (game/'focmp.dll').write_bytes(installed);run('uninstall')
+ run(extra=['--overwrite']);assert (game/'focmp.dll').read_bytes()==installed
+ assert (game/'focmp.ini').read_bytes()==settings
+ run('uninstall')
+ # Explicit replacement and a selected downgrade must retain the original proxy backup and settings.
+ (game/'version.dll').write_bytes(original);run()
+ (game/'version.dll').write_bytes(b'external proxy modification')
+ run(ok=False);run(extra=['--overwrite'])
+ assert (game/'.focmp/backup/version.dll').read_bytes()==original
+ older=copy.deepcopy(m);older['version']='0.0.1'
+ older['package']['url']='https://github.com/ojasookert/focmp/releases/download/v0.0.1/FOCMP-0.0.1.zip'
+ older_path=t/'older.json';older_path.write_text(json.dumps(older))
+ run(manifest=older_path)
+ assert json.loads((game/'.focmp/install.json').read_text())['version']=='0.0.1'
+ run('uninstall');assert (game/'version.dll').read_bytes()==original
+ assert (game/'focmp.ini').read_bytes()==settings
+ (game/'version.dll').unlink()
  # A failure after the first DLL replacement must roll back, and a retry must work.
  (game/'focmp.ini').unlink();(game/'version.dll').write_bytes(original)
  (game/'.focmp.ini.focmp-tmp').write_bytes(b'occupied staging path')

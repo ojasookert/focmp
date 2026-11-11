@@ -8,10 +8,11 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 pub const EXE: &str = "Flashes_of_Chaos.exe";
 #[derive(Clone)]
 pub struct Steam {
-    pub root: PathBuf,
     pub libraries: Vec<PathBuf>,
 }
 impl Steam {
@@ -23,6 +24,7 @@ impl Steam {
             #[cfg(windows)]
             {
                 if let Ok(o) = Command::new("powershell.exe")
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
                     .args(["-NoProfile", "-Command", r"[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::Write((Get-ItemProperty 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath)"])
                     .output()
                 {
@@ -71,27 +73,13 @@ impl Steam {
                 }
             }
         }
-        Some(Self { root, libraries })
+        Some(Self { libraries })
     }
     /// Steam's build id of the installed game, from the library's appmanifest next to the game folder.
     pub fn build_id(game: &Path) -> Option<u64> {
         let steamapps = game.parent()?.parent()?;
         let text = fs::read_to_string(steamapps.join("appmanifest_3399100.acf")).ok()?;
         vdf::parse(&text).path(&["AppState", "buildid"])?.str()?.parse().ok()
-    }
-
-    /// Steam's cached library art for the game (`appcache/librarycache/<app>/[<hash>/]<file>`), with the folder hash
-    /// the CDN uses for the full size versions.
-    pub fn cached_art(&self, file: &str) -> Option<(PathBuf, Option<String>)> {
-        let base = self.root.join("appcache/librarycache/3399100");
-        if base.join(file).is_file() {
-            return Some((base.join(file), None));
-        }
-        fs::read_dir(&base).ok()?.flatten().find_map(|e| {
-            let p = e.path().join(file);
-            p.is_file()
-                .then(|| (p, Some(e.file_name().to_string_lossy().into_owned())))
-        })
     }
 
     pub fn game(&self) -> Option<PathBuf> {
@@ -129,6 +117,7 @@ pub fn game_running(game: &Path) -> Result<bool> {
     {
         let _ = game;
         let out = Command::new("tasklist")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args([
                 "/FI",
                 "IMAGENAME eq Flashes_of_Chaos.exe",

@@ -1,9 +1,8 @@
-//! The installer's banner and icon. The game's hero art and logo (Steam's cached copies, upgraded to the full size
-//! versions on Steam's CDN) with the mod's MULTIPLAYER pixel lettering under the logo; the blood drips on the
-//! lettering are animated by `gui.rs`. The game's art isn't bundled: without Steam or a connection the installer
-//! keeps its plain heading and icon. Lettering and drips: `assets/`, made by `scripts/make_art.py`.
+//! The installer's banner and icon. The game's hero art and logo, bundled in `assets/` (they belong to Brainburn
+//! Studio and are used with permission), with the mod's MULTIPLAYER pixel lettering under the logo; the blood drips
+//! on the lettering are animated by `gui.rs`. Everything is local: no Steam cache or CDN is needed.
+//! All of `assets/` is made by `scripts/make_art.py` (the game art with `--game-art`).
 
-use crate::steam::Steam;
 use eframe::egui;
 use image::imageops::{self, FilterType};
 use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage};
@@ -11,11 +10,9 @@ use serde::Deserialize;
 
 const WORD: &[u8] = include_bytes!("../assets/multiplayer.png");
 const DRIPS: &str = include_str!("../assets/drips.json");
-const CDN: &str = "https://shared.steamstatic.com/store_item_assets/steam/apps/3399100";
-/// The art's current folders on the CDN, for when Steam's cache has none. The CDN's unversioned paths serve the
-/// game's old logo. Same as scripts/make_art.py.
-const HERO_HASH: &str = "110eacf56d942048454af71c943c585f3b745116";
-const LOGO_HASH: &str = "78b726cbb14bae6b97bce00faff99aa182c81ee2";
+const HERO: &[u8] = include_bytes!("../assets/hero.jpg");
+const LOGO: &[u8] = include_bytes!("../assets/logo.png");
+const ICON: &[u8] = include_bytes!("../assets/icon.png");
 pub const W: u32 = 1440;
 pub const H: u32 = 400;
 pub const PINK: [u8; 3] = [255, 45, 205];
@@ -55,51 +52,19 @@ pub struct Art {
     pub icon: Option<egui::IconData>,
 }
 
-pub fn load(steam: Option<&Steam>) -> Art {
-    let Some(hero) = fetch(steam, "library_hero.jpg", "library_hero_2x.jpg", HERO_HASH) else {
-        return Art::default();
-    };
-    let logo = fetch(steam, "logo.png", "logo_2x.png", LOGO_HASH);
+pub fn load() -> Art {
+    let hero = image::load_from_memory(HERO).expect("bundled hero art");
+    let logo = image::load_from_memory(LOGO).ok();
     Art {
         banner: Some(banner(&hero, logo.as_ref())),
-        icon: Some(icon(&hero)),
+        icon: Some(icon()),
     }
-}
-
-/// The art's full size version from the CDN (in the folder Steam's cache names, else the known one), or Steam's
-/// cached copy.
-fn fetch(steam: Option<&Steam>, cached: &str, full_size: &str, known: &str) -> Option<DynamicImage> {
-    let local = steam.and_then(|s| s.cached_art(cached));
-    let mut urls = Vec::new();
-    if let Some((_, Some(hash))) = &local {
-        urls.push(format!("{CDN}/{hash}/{full_size}"));
-    }
-    let fallback = format!("{CDN}/{known}/{full_size}");
-    if !urls.contains(&fallback) {
-        urls.push(fallback);
-    }
-    for url in urls {
-        let Ok(mut response) = ureq::get(&url).header("User-Agent", "focmp-installer").call() else {
-            continue;
-        };
-        let Ok(bytes) = response.body_mut().with_config().limit(32 << 20).read_to_vec() else {
-            continue;
-        };
-        if let Ok(img) = image::load_from_memory(&bytes) {
-            return Some(img);
-        }
-    }
-    image::open(local?.0).ok()
 }
 
 /// The helmeted figure from the hero art, square, 256 px.
-fn icon(hero: &DynamicImage) -> egui::IconData {
-    let s = hero.width() as f32 / 3840.0;
-    let face = hero
-        .crop_imm((2470.0 * s) as u32, (150.0 * s) as u32, (480.0 * s) as u32, (480.0 * s) as u32)
-        .resize_exact(256, 256, FilterType::Lanczos3)
-        .to_rgba8();
-    egui::IconData { width: 256, height: 256, rgba: face.into_raw() }
+fn icon() -> egui::IconData {
+    let face = image::load_from_memory(ICON).expect("bundled icon").to_rgba8();
+    egui::IconData { width: face.width(), height: face.height(), rgba: face.into_raw() }
 }
 
 /// Hero art filling W x H, the logo on the left (at most 2/5 of the width) and the lettering under it, with glow.

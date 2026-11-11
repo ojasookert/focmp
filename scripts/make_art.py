@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Generates the installer's MULTIPLAYER artwork assets, and optionally the README's animated header.
 
-    python3 scripts/make_art.py [--font DejaVuSans-Bold.ttf] [--header]
+    python3 scripts/make_art.py [--font DejaVuSans-Bold.ttf] [--game-art] [--header]
+    python3 scripts/make_art.py --game-art     (only the game art; needs no font)
 
 Writes (committed, so building the installer needs neither Python nor a font):
   installer/assets/multiplayer.png  the word's pixel letters with a 1 px dark outline, at pixel resolution
   installer/assets/drips.json       the blood drips: column, start row, length, period and phase (4 s loop)
-With --header also docs/header.webp: the installer banner animated (1440x400, 30 fps, 4 s loop), made from the
-game's hero art and logo downloaded from Steam's CDN (they belong to Brainburn Studio; see README, License).
+With --game-art also the game's art the installer bundles, downloaded from Steam's CDN (it belongs to Brainburn
+Studio and is used with permission; see README, License):
+  installer/assets/hero.jpg         the hero art cropped to the banner (1440x400)
+  installer/assets/logo.png         the game's logo, trimmed to its visible pixels
+  installer/assets/icon.png         the helmeted figure from the hero art, 256 px (window icon)
+With --header also docs/header.webp: the installer banner animated (1440x400, 30 fps, 4 s loop).
 Needs Pillow.
 """
 import argparse, io, json, random, urllib.request
@@ -101,6 +106,19 @@ def fetch(name):
     return Image.open(io.BytesIO(urllib.request.urlopen(req, timeout=30).read())).convert("RGBA")
 
 
+def game_art(assets):
+    """The game's art at the sizes the installer uses (installer/src/art.rs composes the banner from it)."""
+    hero, logo = fetch(HERO), fetch(LOGO)
+    ImageOps.fit(hero, (1440, 400), Image.Resampling.LANCZOS, centering=(0.5, 0.35)).convert("RGB").save(
+        assets / "hero.jpg", quality=90, optimize=True)
+    lgc = logo.crop(logo.getchannel("A").point(lambda v: 255 if v > 40 else 0).getbbox())
+    lgc.thumbnail((640, 640), Image.LANCZOS)
+    lgc.save(assets / "logo.png", optimize=True)
+    s = hero.width / 3840
+    face = hero.crop((int(2470 * s), int(150 * s), int(2950 * s), int(630 * s)))
+    face.resize((256, 256), Image.LANCZOS).convert("RGB").save(assets / "icon.png", optimize=True)
+
+
 def header(img, mask, spec, out):
     """The installer banner (same layout as installer/src/art.rs), animated."""
     W, H = 1440, 400
@@ -131,16 +149,25 @@ def header(img, mask, spec, out):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--font", default=next((f for f in FONTS if Path(f).is_file()), None), help="a bold TTF (DejaVu Sans Bold)")
+    p.add_argument("--game-art", action="store_true", help="also write the game art the installer bundles (downloads it)")
     p.add_argument("--header", action="store_true", help="also render docs/header.webp (downloads the game's art)")
     a = p.parse_args()
+    assets = ROOT / "installer/assets"
+    if a.game_art and not a.header:
+        # the game art doesn't depend on the lettering, so this needs no font
+        game_art(assets)
+        print("hero.jpg, logo.png, icon.png")
+        return
     if not a.font:
         p.error("no DejaVu Sans Bold found; pass --font")
     img, mask, bottoms = letters(a.font)
     spec = drips(bottoms)
-    assets = ROOT / "installer/assets"
     img.save(assets / "multiplayer.png", optimize=True)
     (assets / "drips.json").write_text(json.dumps({"text_px": PX, "loop": LOOP, "drips": spec}, indent=1) + "\n")
     print(f"multiplayer.png {img.size}, {len(spec)} drips")
+    if a.game_art:
+        game_art(assets)
+        print("hero.jpg, logo.png, icon.png")
     if a.header:
         header(img, mask, spec, ROOT / "docs/header.webp")
         print("docs/header.webp")

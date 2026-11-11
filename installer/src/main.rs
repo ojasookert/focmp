@@ -32,7 +32,7 @@ fn cli(args: &[String]) -> Result<()> {
     }
     if args == ["--help"] || args == ["-h"] {
         println!(
-            "FOCMP installer {}\n\nUsage: focmp-installer [status|install|uninstall|launch|check-updates]\n  --game-dir PATH       Game directory (otherwise detected through Steam)\n  --steam-root PATH     Use a specific Steam installation\n  --no-proton-config    Skip the Proton DLL override (manual setup)\n  --manifest PATH       Use a local release manifest\n  --package PATH        Use its matching local ZIP\n\nNo arguments opens the graphical installer. Close the game before installation.\nOn Linux, start the game once first so Proton creates its prefix.",
+            "FOCMP installer {}\n\nUsage: focmp-installer [status|install|uninstall|launch|check-updates]\n  --game-dir PATH       Game directory (otherwise detected through Steam)\n  --steam-root PATH     Use a specific Steam installation\n  --no-proton-config    Skip the Proton DLL override (manual setup)\n  --manifest PATH       Use a local release manifest\n  --package PATH        Use its matching local ZIP\n  --overwrite           Replace mod files changed outside the installer\n\nNo arguments opens the graphical installer. Close the game before installation.\nOn Linux, start the game once first so Proton creates its prefix.",
             m.version
         );
         return Ok(());
@@ -42,10 +42,12 @@ fn cli(args: &[String]) -> Result<()> {
     let mut root = None;
     let mut package = None;
     let mut configure = !cfg!(windows);
+    let mut overwrite = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--no-proton-config" | "--no-steam-config" => configure = false,
+            "--overwrite" => overwrite = true,
             "--game-dir" | "--steam-root" | "--manifest" | "--package" => {
                 let opt = &args[i];
                 i += 1;
@@ -95,7 +97,7 @@ fn cli(args: &[String]) -> Result<()> {
             if configure {
                 steam::prepare(steam.as_ref(), &game)?;
             }
-            let message = install::install(&game, &m, package.as_deref())?;
+            let message = install::install(&game, &m, package.as_deref(), overwrite)?;
             if configure {
                 steam::configure(steam.as_ref(), &game).map_err(|e| {
                     format!("Mod files installed, but the Proton setup needs attention: {e}")

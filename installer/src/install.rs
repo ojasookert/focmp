@@ -149,7 +149,19 @@ fn unpack(data: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     }
     Ok(files)
 }
-pub fn install(game: &Path, m: &Manifest, local: Option<&Path>) -> Result<String> {
+/// Installed mod files whose content no longer matches what the installer wrote (focmp.ini is the user's to edit).
+pub fn changed(game: &Path) -> Result<Vec<String>> {
+    let Some(r) = record(game)? else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for (n, h) in &r.files {
+        if n != "focmp.ini" && game.join(n).exists() && manifest::file_hash(&game.join(n))? != *h {
+            out.push(n.clone());
+        }
+    }
+    Ok(out)
+}
+/// `overwrite` replaces mod files that were changed outside the installer (see `changed`).
+pub fn install(game: &Path, m: &Manifest, local: Option<&Path>, overwrite: bool) -> Result<String> {
     let game = game.canonicalize().map_err(err)?;
     paths(&game)?;
     let _lock = lock(&game)?;
@@ -171,17 +183,10 @@ pub fn install(game: &Path, m: &Manifest, local: Option<&Path>) -> Result<String
         files: BTreeMap::new(),
         backups: BTreeMap::new(),
     });
-    if let Some(p) = &prior {
-        if manifest::version(&p.version) > manifest::version(&m.version) {
-            return Err("A newer mod is already installed; refusing to downgrade.".into());
-        }
-    }
-    for (n, h) in &r.files {
-        if n != "focmp.ini" && game.join(n).exists() && manifest::file_hash(&game.join(n))? != *h {
-            return Err(format!(
-                "{n} was changed outside the installer; restore it before updating."
-            ));
-        }
+    if !overwrite && let Some(n) = changed(&game)?.first() {
+        return Err(format!(
+            "{n} was changed outside the installer; restore it, or overwrite it (--overwrite)."
+        ));
     }
     let state = game.join(".focmp");
     fs::create_dir_all(state.join("backup")).map_err(err)?;
@@ -256,7 +261,7 @@ pub fn install(game: &Path, m: &Manifest, local: Option<&Path>) -> Result<String
         ));
     }
     Ok(format!(
-        "FOCMP {} installed. Existing settings were preserved. Launch from Steam as usual.",
+        "FOCMP {} installed.",
         m.version
     ))
 }
@@ -316,7 +321,7 @@ pub fn uninstall(game: &Path) -> Result<String> {
     let _ = fs::remove_dir(game.join(".focmp/backup"));
     let _ = fs::remove_dir(game.join(".focmp"));
     Ok(format!(
-        "FOCMP removed; original files restored. Saves were kept.{}",
+        "FOCMP removed; original files restored.{}",
         if keep_config {
             " Your edited focmp.ini was also kept."
         } else {
