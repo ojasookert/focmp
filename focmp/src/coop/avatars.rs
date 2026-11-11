@@ -4,7 +4,7 @@ use crate::engine::{G, V, asset_id, boolean, real, truthy};
 use crate::net::AvatarPart;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 static GUN_DRAW: AtomicUsize = AtomicUsize::new(0);
 static GUN_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -15,6 +15,7 @@ static DRAW: AtomicUsize = AtomicUsize::new(0);
 static SPRITE: AtomicUsize = AtomicUsize::new(0);
 static SIMPLE: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static DEAD_SPRITE: AtomicI32 = AtomicI32::new(-1);
 static COLOR: AtomicU8 = AtomicU8::new(0);
 static FRAME: LazyLock<Mutex<Vec<AvatarPart>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static SNAPSHOT: LazyLock<Mutex<Vec<AvatarPart>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -130,6 +131,13 @@ unsafe extern "C-unwind" fn draw(s: *mut c_void, o: *mut c_void) {
     FRAME.lock().unwrap().clear();
     super::avatar_color::begin_frame();
     TARGETS.lock().unwrap().clear();
+    // Player death switches to native enemy corpse artwork. The old s_player
+    // filter captured only its shadow, then hid the fallback body on peers.
+    let dead_sprite = G::new().and_then(|g| {
+        g.first("objPlayer").filter(|p| truthy(&g.get(*p, "dead")))
+            .map(|p| asset_id(g.get(p, "sprite_index")))
+    }).unwrap_or(-1);
+    DEAD_SPRITE.store(dead_sprite, Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Relaxed);
     unsafe { f(s, o) };
     ACTIVE.store(false, Ordering::Relaxed);
@@ -176,7 +184,9 @@ unsafe extern "C-unwind" fn sprite(s: *mut c_void, sp: i32, fr: f32, x: f32, y: 
         return;
     };
     let name = g.sprite_name(real(sp as f64));
-    if !name.starts_with("s_player") {
+    let tint = name.starts_with("s_player");
+    let status = matches!(name.as_str(), "s_frozen_status" | "s_weak_status");
+    if !tint && !status && sp != DEAD_SPRITE.load(Ordering::Relaxed) {
         unsafe { f(s, sp, fr, x, y, xs, ys, angle, blend, alpha) };
         return;
     }
@@ -215,15 +225,16 @@ unsafe extern "C-unwind" fn sprite(s: *mut c_void, sp: i32, fr: f32, x: f32, y: 
         for (color, parts) in REMOTES.lock().unwrap().clone() {
             for p in parts.into_iter().filter(|p| p.pass == pass) {
                 let original = g.asset(&p.sprite);
-                let colored = tinted(g, s, original, color);
+                let tint = p.sprite.starts_with("s_player");
+                let colored = if tint { tinted(g, s, original, color) } else { original };
                 unsafe { f(s, asset_id(colored), p.frame, p.x, p.y, p.xs, p.ys, p.angle, p.blend, p.alpha) };
-                unsafe { super::avatar_color::mask(g, s, f, color, asset_id(original), p.frame, p.x, p.y, p.xs, p.ys, p.angle, p.alpha); }
+                if tint { unsafe { super::avatar_color::mask(g, s, f, color, asset_id(original), p.frame, p.x, p.y, p.xs, p.ys, p.angle, p.alpha); } }
             }
         }
     }
-    let colored = tinted(g, s, real(sp as f64), COLOR.load(Ordering::Relaxed));
+    let colored = if tint { tinted(g, s, real(sp as f64), COLOR.load(Ordering::Relaxed)) } else { real(sp as f64) };
     unsafe { f(s, asset_id(colored), fr, x, y, xs, ys, angle, blend, alpha) };
-    unsafe { super::avatar_color::mask(g, s, f, COLOR.load(Ordering::Relaxed), sp, fr, x, y, xs, ys, angle, alpha); }
+    if tint { unsafe { super::avatar_color::mask(g, s, f, COLOR.load(Ordering::Relaxed), sp, fr, x, y, xs, ys, angle, alpha); } }
 }
 /// Bake the game's existing sprite through its native color-grading shader.
 /// This preserves texture alpha and animation frames; no new artwork is used.

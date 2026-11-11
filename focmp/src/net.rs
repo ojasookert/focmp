@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 33;
+pub const PROTOCOL: u32 = 34;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -71,6 +71,7 @@ pub struct PlayerState {
     pub hp: f32,
     pub hp_max: f32,
     pub dead: bool,
+    pub onfire: bool,
     pub can_revive: bool,
 }
 

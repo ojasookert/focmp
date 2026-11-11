@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 pub struct Ghost {
+    peer: PeerId,
     pub legs: V,
     pub body: V,
     pub gun: V,
@@ -67,7 +68,7 @@ impl Ghosts {
                 let mk = |depth: f32| {
                     g.call("instance_create_depth", &[real(s.x as f64), real(s.y as f64), real(depth as f64), dummy])
                 };
-                let gh = Ghost { legs: mk(s.depth + 1.0), body: mk(s.depth), gun: mk(s.gun_depth), x: s.x, y: s.y, dead: s.dead };
+                let gh = Ghost { peer: id, legs: mk(s.depth + 1.0), body: mk(s.depth), gun: mk(s.gun_depth), x: s.x, y: s.y, dead: s.dead };
                 for inst in [gh.legs, gh.body, gh.gun] {
                     g.set(inst, "image_speed", real(0.0));
                     g.set(inst, "focmp_ghost", real(id as f64));
@@ -84,14 +85,28 @@ impl Ghosts {
                 gh.x += dx * 0.5;
                 gh.y += dy * 0.5;
             }
+            if s.dead && !gh.dead {
+                death_splatter(g, s.x, s.y);
+            }
             gh.dead = s.dead;
             apply(g, gh, s);
+            super::player_fire::update(g, id, gh.body, s.onfire && !s.dead);
         }
     }
 }
 
 fn sprite(g: G, name: &str) -> V {
     if name.is_empty() { real(-1.0) } else { g.asset(name) }
+}
+
+fn death_splatter(g: G, x: f32, y: f32) {
+    let Some(print) = g.first("objPrint") else { return; };
+    let _rng = super::rng::Scope::preserve();
+    let method = g.call("method", &[print, g.get(print, "add_blood_splatter")]);
+    let args = g.call("array_create", &[real(2.0)]);
+    g.call("array_set", &[args, real(0.0), real(x as f64)]);
+    g.call("array_set", &[args, real(1.0), real(y as f64)]);
+    g.call("method_call", &[method, args]);
 }
 
 fn apply(g: G, gh: &Ghost, s: &PlayerState) {
@@ -129,6 +144,7 @@ fn apply(g: G, gh: &Ghost, s: &PlayerState) {
 }
 
 fn destroy(g: G, gh: &Ghost) {
+    super::player_fire::clear(g, gh.peer);
     if g.exists(gh.body){super::lights::destroy(g,gh.body); }
     // Native enemy state machines dereference Player every frame. Retarget
     // before removing their anchor; the periodic AI pass is too late.

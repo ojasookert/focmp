@@ -37,6 +37,7 @@ mod team_hud;
 mod latency;
 mod friend_lobbies;
 mod avatar_color;
+mod player_fire;
 pub(crate) mod props;
 pub mod selection;
 pub mod travel;
@@ -550,6 +551,7 @@ pub fn capture_local(g: G) -> Option<PlayerState> {
         hp: f("hp"),
         hp_max: f("hp_max"),
         dead: truthy(&g.get(p, "dead")),
+        onfire: truthy(&g.get(p, "onfire")),
         can_revive:truthy(&g.get(p,"revive")),
         ..Default::default()
     };
