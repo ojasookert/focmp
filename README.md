@@ -2,7 +2,7 @@
 
 # FOCMP
 
-FOCMP adds three-player online co-op to [Flashes of Chaos](https://store.steampowered.com/app/3399100/) through Steam lobbies. It runs on Windows and on Linux or Steam Deck through Proton, and supports game versions **v1.0.02** and **v1.0.01 hotfix**.
+FOCMP adds three-player online co-op to [Flashes of Chaos](https://store.steampowered.com/app/3399100/) through Steam lobbies. It runs on Windows and on Linux or Steam Deck through Proton. The latest supported game version is **v1.0.02**.
 
 FOCMP doesn't include the game: you need your own copy of Flashes of Chaos on Steam to use it.
 

@@ -148,10 +148,11 @@ jobs:
           import json, os
           m = json.load(open('manifest.json'))
           v, repo = m['version'], os.environ['GH_REPO']
-          games = ' or '.join(f"**{g['name']}**" for g in m.get('game_versions', []))
+          games = m.get('game_versions', [])
           if not games:
               raise SystemExit('manifest.json has no game_versions')
-          print(f"""Three-player co-op for Flashes of Chaos, via Steam lobbies. Supports {games}; everyone in a lobby needs the same game version and FOCMP version.
+          latest_game = games[0]['name']
+          print(f"""Three-player co-op for Flashes of Chaos, via Steam lobbies. The latest supported game version is **{latest_game}**; everyone in a lobby needs the same game version and FOCMP version.
 
           Unofficial and free. Brainburn Studio doesn't support or maintain it; report problems in [Issues](https://github.com/{repo}/issues).
 
