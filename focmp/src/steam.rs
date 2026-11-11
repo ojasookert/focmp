@@ -12,9 +12,11 @@ use std::{
     time::{Duration, Instant},
 };
 const CHANNEL: i32 = 23673;
+mod codec;
+mod pressure;
 mod outbox;
 mod snapshots;
-use outbox::{Outbox, Progress, CHUNK, MAX};
+use outbox::{Outbox, Progress, CHUNK};
 #[repr(C)]
 struct Identity {
     kind: i32,
@@ -92,6 +94,7 @@ impl Api {
             "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser",
             "SteamAPI_ISteamNetworkingMessages_SendMessageToUser",
             "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel",
+            "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo",
             "SteamAPI_SteamNetworkingMessage_t_Release",
         ] {
             a.symbol(name)?;
@@ -179,6 +182,8 @@ impl Api {
         );
     }
 }
+pub(crate) mod friends;
+
 // Windows x64 CCallbackBase ABI. MSVC reverses the two Run overloads in
 // its vtable: Run(data, failure, call), Run(data), GetCallbackSizeBytes.
 // The callback stays registered for the DLL/process lifetime. The game pumps
@@ -334,11 +339,14 @@ pub struct Steam {
     partial: HashMap<(u64, u64), Partial>,
     seq: u64,
     outboxes: HashMap<u64, Outbox>,
+    decoders: HashMap<u64, codec::History>,
+    pressure_log: HashMap<u64, Instant>,
     my_id: PeerId,
     name: String,
     events: Vec<Event>,
     admission: Arc<Mutex<Admission>>,
     failed: bool,
+    published_members: Option<i32>,
 }
 impl Steam {
     pub fn new(role: Role, code: &str, admission: Arc<Mutex<Admission>>) -> Result<Self, String> {
@@ -386,13 +394,26 @@ impl Steam {
             partial: HashMap::new(),
             seq: 0,
             outboxes: HashMap::new(),
+            decoders: HashMap::new(),
+            pressure_log: HashMap::new(),
             my_id: if role == Role::Host { 0 } else { 255 },
             name,
             events: vec![],
             admission,
             failed: false,
+            published_members: None,
         })
     }
+    /// Steam measures this below the game's frame-driven polling loop.
+    pub fn ping(&self, peer: PeerId) -> Option<u16> {
+        let (&id, _) = self.peers.iter().find(|(_, p)| **p == peer)?;
+        let mut status = pressure::Status::default();
+        let state = call!(self.api, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo",
+            unsafe extern "C" fn(usize, *const Identity, *mut c_void, *mut pressure::Status) -> i32,
+            self.api.messages, &Identity::new(id), std::ptr::null_mut(), &mut status);
+        (state == 3 && status.ping >= 0).then(|| status.ping.min(u16::MAX as i32) as u16)
+    }
+
     pub fn connected(&self) -> bool {
         !self.failed
             && self.handle == 0
@@ -408,7 +429,7 @@ impl Steam {
     fn send(&mut self, to: u64, p: &Packet) {
         if self.failed { return; }
         self.seq = self.seq.wrapping_add(1);
-        let data = bitcode::encode(p);
+        let data = snapshots::encode(p);
         let queue = self.outboxes.entry(to).or_default();
         let now = Instant::now();
         let replace = snapshots::key(p);
@@ -425,11 +446,14 @@ impl Steam {
             outbox::Error::Capacity => "outgoing queue reached its bounded capacity".into(),
             outbox::Error::Expired => "outgoing queue stalled for 15 seconds".into(),
             outbox::Error::Send(result) => format!("send failed ({result})"),
+            outbox::Error::Codec(reason) => format!("packet codec failed: {reason}"),
         };
         let (bytes, packets) = self.outboxes.get(&to).map_or((0, 0), |q| (q.bytes(), q.len()));
         let reason = format!("Steam {detail}; peer {to}, lobby {}, queued {bytes} bytes / {packets} packets", self.lobby);
         crate::log(&reason);
         self.outboxes.remove(&to);
+        self.decoders.remove(&to);
+        self.pressure_log.remove(&to);
         self.partial.retain(|(sender, _), _| *sender != to);
         if self.role == Role::Host {
             // A slow/broken client must not tear down the host and healthy peer.
@@ -444,19 +468,31 @@ impl Steam {
         for id in ids {
             if self.failed { break; }
             let Some(queue) = self.outboxes.get_mut(&id) else { continue };
-            let result = queue.flush(now, |bytes| call!(
+            let mut status = pressure::Status::default();
+            let state = call!(api, "SteamAPI_ISteamNetworkingMessages_GetSessionConnectionInfo",
+                unsafe extern "C" fn(usize, *const Identity, *mut c_void, *mut pressure::Status) -> i32,
+                api.messages, &Identity::new(id), std::ptr::null_mut(), &mut status);
+            let budget = if state == 3 { status.budget() } else { CHUNK + 20 };
+            if (status.queue_us > 100_000 || (budget == 0 && queue.len() > 0))
+                && self.pressure_log.get(&id).is_none_or(|t| now.duration_since(*t) >= Duration::from_secs(5)) {
+                crate::log(&format!("Steam queue: peer {id}, pending {} bytes, unacked {}, delay {} ms, rate {} B/s, app {} bytes / {} batches, raw {} / wire {} bytes, compacted {}",
+                    status.pending_reliable, status.unacked_reliable, status.queue_us / 1000, status.send_rate,
+                    queue.bytes(), queue.len(), queue.raw_bytes, queue.wire_bytes, queue.replaced));
+                self.pressure_log.insert(id, now);
+            }
+            let result = queue.flush_budget(now, budget, |bytes| call!(
                 api,
                 "SteamAPI_ISteamNetworkingMessages_SendMessageToUser",
                 unsafe extern "C" fn(usize, *const Identity, *const u8, u32, i32, i32) -> i32,
                 api.messages, &Identity::new(id), bytes.as_ptr(), bytes.len() as u32, 8, CHANNEL
             ));
             match result {
-                Ok(Progress::Blocked) => crate::log(&format!(
-                    "Steam congestion: peer {id}, lobby {}, queued {} bytes / {} packets; retrying (25)",
-                    self.lobby, queue.bytes(), queue.len())),
-                Ok(Progress::Recovered) => crate::log(&format!(
-                    "Steam congestion recovered: peer {id}, retries {}, superseded snapshots {}",
-                    queue.retries, queue.replaced)),
+                Ok(Progress::Blocked) if self.pressure_log.get(&id)
+                    .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs(5)) => {
+                    crate::log(&format!("Steam congestion: peer {id}, queued {} bytes / {} batches, pending {}, delay {} ms, retries {}, compacted {}",
+                        queue.bytes(), queue.len(), status.pending_reliable, status.queue_us / 1000, queue.retries, queue.replaced));
+                    self.pressure_log.insert(id, now);
+                }
                 Err(e) => self.send_failed(id, e),
                 _ => {}
             }
@@ -499,6 +535,8 @@ impl Steam {
             .find_map(|(id, p)| (*p == peer).then_some(*id))
         {
             self.outboxes.remove(&id);
+            self.decoders.remove(&id);
+            self.pressure_log.remove(&id);
             self.partial.retain(|(sender, _), _| *sender != id);
             self.peers.remove(&id);
             self.api.close(id);
@@ -649,6 +687,9 @@ impl Steam {
                         self.api.data(self.lobby, "focmp", &PROTOCOL.to_string());
                         self.api.data(self.lobby, "version", crate::version::BUILD);
                         self.api.data(self.lobby, "running", "0");
+                        self.api.data(self.lobby, "host", &self.api.me.to_string());
+                        self.api.data(self.lobby, "players", "1");
+                        self.published_members = Some(1);
                         let me = PeerInfo {
                             id: 0,
                             name: self.name.clone(),
@@ -688,6 +729,10 @@ impl Steam {
                 self.lobby
             );
             let mut allowed = HashSet::new();
+            if self.role == Role::Host && n >= 1 && self.published_members != Some(n) {
+                self.api.data(self.lobby, "players", &n.to_string());
+                self.published_members = Some(n);
+            }
             for i in 0..n.clamp(0, MAX_PLAYERS as i32) {
                 let id = call!(
                     self.api,
@@ -760,14 +805,14 @@ impl Steam {
                     && !m.data.is_null()
                 {
                     let bytes = unsafe { std::slice::from_raw_parts(m.data, m.size as usize) };
-                    if &bytes[..4] == b"FMP1" {
+                    if &bytes[..4] == b"FMP2" {
                         let id = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
                         let index = u16::from_le_bytes(bytes[12..14].try_into().unwrap()) as usize;
                         let count = u16::from_le_bytes(bytes[14..16].try_into().unwrap()) as usize;
                         let total = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
                         let sender = m.identity.data[0];
                         if total > 0
-                            && total <= MAX
+                            && total <= codec::WIRE_MAX
                             && count == total.div_ceil(CHUNK)
                             && index < count
                             && bytes.len() - 20
@@ -791,8 +836,11 @@ impl Steam {
                                     let entry = self.partial.remove(&(sender, id)).unwrap();
                                     let data: Vec<u8> =
                                         entry.parts.into_iter().flatten().flatten().collect();
-                                    if let Ok(packet) = bitcode::decode(&data) {
-                                        self.packet(sender, packet);
+                                    let decoded = self.decoders.entry(sender).or_default().decode(id, &data)
+                                        .and_then(|data| snapshots::decode(&data));
+                                    match decoded {
+                                        Ok(packets) => for packet in packets { self.packet(sender, packet); },
+                                        Err(reason) => self.send_failed(sender, outbox::Error::Codec(reason)),
                                     }
                                 }
                             }

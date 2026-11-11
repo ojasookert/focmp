@@ -44,7 +44,6 @@ impl Card {
                     && s.len() <= 96
                     && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
             })
-            && self.parent != "punch"
             && self.tier.is_finite()
             && (0.0..=10.0).contains(&self.tier)
             && self

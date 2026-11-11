@@ -299,7 +299,6 @@ unsafe fn draw(s: *mut c_void, o: *mut c_void, stage: u8, slot: &AtomicUsize) {
     if let Some(inst) = unsafe { g.rt.builtin_var_of("id", s) } {
         if stage == 1 && c.selection.instance == Some(key(&inst)) { previews(g, &c, inst, o); }
     }
-    super::cursors::draw(g, &c);
 }
 unsafe extern "C-unwind" fn perk_draw(s: *mut c_void, o: *mut c_void) { unsafe { draw(s, o, 1, &PERK_DRAW) } }
 unsafe extern "C-unwind" fn gun_draw(s: *mut c_void, o: *mut c_void) { unsafe { draw(s, o, 2, &GUN_DRAW) } }

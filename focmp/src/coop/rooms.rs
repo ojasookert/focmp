@@ -80,6 +80,21 @@ pub fn level_sub(g: G) -> (u32, u32) {
     (g.num(lv, "level") as u32, g.num(lv, "sub") as u32)
 }
 
+/// Personal screens belonging to a hub visit, including its post-fight rewards.
+/// The caller must also match the run and level/sub; this is not permission to
+/// cross a shared stage transition. Keep run setup, fights and endings out.
+pub fn personal_hub_room(room: &str) -> bool {
+    matches!(room,
+        "Room_hub" | "Room_hub_1" | "Room_shop"
+        | "Room_select_card" | "Room_select_tool" | "Room_show_cards"
+        | "Room_combine" | "Room_duplicate" | "Room_flexmod" | "Room_flexsticker"
+        | "Room_mod_fusion" | "Room_random_multiplier" | "Room_remove_mod"
+        | "Room_rotate_mods" | "Room_slot_machine" | "Room_splitcard"
+        | "Room_sticker" | "Room_swap_mods" | "Room_transfer" | "Room_transfer_tutorial" | "Room_upgrade"
+        | "Room_select_perk_game" | "Room_show_perk_game_gambler" | "Room_new_unlocks"
+    )
+}
+
 fn mix(mut x: u64) -> u64 {
     // splitmix64 finalizer
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);

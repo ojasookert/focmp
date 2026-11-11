@@ -1,13 +1,15 @@
 //! User-selected player colors. Duplicates are deliberately allowed.
+// Shared by the picker, pointers, avatars and HUD. Lift the original neon
+// palette 20% toward white for brighter pastels without changing color IDs.
 pub const PALETTE: [(&str, (u8, u8, u8)); 8] = [
-    ("Neon pink", (255, 50, 176)),
-    ("Neon cyan", (50, 235, 255)),
-    ("Neon lime", (160, 255, 60)),
-    ("Neon orange", (255, 148, 40)),
-    ("Neon violet", (184, 102, 255)),
-    ("Neon yellow", (255, 245, 80)),
-    ("Neon blue", (70, 132, 255)),
-    ("Neon coral", (255, 92, 96)),
+    ("Pink", (255, 91, 192)),
+    ("Cyan", (91, 239, 255)),
+    ("Lime", (179, 255, 99)),
+    ("Orange", (255, 169, 83)),
+    ("Violet", (198, 133, 255)),
+    ("Yellow", (255, 247, 115)),
+    ("Blue", (107, 157, 255)),
+    ("Coral", (255, 125, 128)),
 ];
 pub fn name(index: u8) -> &'static str { PALETTE[index as usize % PALETTE.len()].0 }
 pub fn value(index: u8) -> f64 {

@@ -25,6 +25,7 @@ type Event = unsafe extern "C-unwind" fn(*mut c_void, *mut c_void);
 type Sprite = unsafe extern "C-unwind" fn(*mut c_void, i32, f32, f32, f32, f32, f32, f32, u32, f32);
 type Simple = unsafe extern "C-unwind" fn(*mut c_void, i32, f32, f32, f32);
 pub fn install(g: G) {
+    super::avatar_color::install(g);
     if DRAW.load(Ordering::Relaxed) != 0 {
         return;
     }
@@ -110,6 +111,7 @@ unsafe extern "C-unwind" fn draw(s: *mut c_void, o: *mut c_void) {
         return;
     }
     FRAME.lock().unwrap().clear();
+    super::avatar_color::begin_frame();
     TARGETS.lock().unwrap().clear();
     ACTIVE.store(true, Ordering::Relaxed);
     unsafe { f(s, o) };
@@ -198,11 +200,13 @@ unsafe extern "C-unwind" fn sprite(s: *mut c_void, sp: i32, fr: f32, x: f32, y: 
                 let original = g.asset(&p.sprite);
                 let colored = tinted(g, s, original, color);
                 unsafe { f(s, asset_id(colored), p.frame, p.x, p.y, p.xs, p.ys, p.angle, p.blend, p.alpha) };
+                unsafe { super::avatar_color::mask(g, s, f, color, asset_id(original), p.frame, p.x, p.y, p.xs, p.ys, p.angle, p.alpha); }
             }
         }
     }
     let colored = tinted(g, s, real(sp as f64), COLOR.load(Ordering::Relaxed));
     unsafe { f(s, asset_id(colored), fr, x, y, xs, ys, angle, blend, alpha) };
+    unsafe { super::avatar_color::mask(g, s, f, COLOR.load(Ordering::Relaxed), sp, fr, x, y, xs, ys, angle, alpha); }
 }
 /// Bake the game's existing sprite through its native color-grading shader.
 /// This preserves texture alpha and animation frames; no new artwork is used.

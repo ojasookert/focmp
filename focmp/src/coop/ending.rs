@@ -427,5 +427,4 @@ pub fn draw(g: G, page: V, c: &Coop) {
     }
     g.call("draw_set_color", &[saved[0]]);
     g.call("draw_set_alpha", &[saved[1]]);
-    super::cursors::draw(g, c);
 }

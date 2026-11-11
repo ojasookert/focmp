@@ -17,9 +17,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 30;
+pub const PROTOCOL: u32 = 32;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -110,7 +110,7 @@ pub enum Msg {
     StartRun { seed: u64, rules: crate::config::RunRules },
     SetReady(bool),
     SetColor(u8),
-    Lobby { ready: [bool; MAX_PLAYERS], colors: [u8; MAX_PLAYERS], running: bool },
+    Lobby { ready: [bool; MAX_PLAYERS], colors: [u8; MAX_PLAYERS], ping_ms: [Option<u16>; MAX_PLAYERS], running: bool },
     DifficultyLoaded { run: u64, unlocked: u8, initial: u8 },
     DifficultyEdit { run: u64, revision: u32, index: u8, enabled: bool },
     DifficultyAgree { run: u64, revision: u32, agree: bool },
@@ -342,7 +342,7 @@ pub struct EnemyDelta {
 
 impl EnemyDelta {
     /// Compose consecutive unsent snapshots, retaining a full keyframe when
-    /// the older snapshot supplied it. Deaths are event barriers in the outbox.
+    /// the older snapshot supplied it. Deaths travel in the ordered combat journal.
     pub(crate) fn merge_older(&mut self, older: Self) {
         if self.keyframe { return; }
         self.keyframe = older.keyframe;
@@ -406,6 +406,8 @@ pub enum Event {
     Joined(PeerInfo),
     Left(PeerId),
     Msg(PeerId, Msg),
+    /// Timestamp at socket receive, before waiting for the next game frame.
+    Pong { from: PeerId, token: u64, received: Instant },
     Failed(String),
     Closed,
 }
@@ -506,6 +508,9 @@ impl Net {
         Ok(Self{steam:Some(Mutex::new(steam)),role,my_id:if role==Role::Host{0}else{255},peers:vec![],addr:"Steam lobby pending".into(),events,writers:Arc::new(Mutex::new(HashMap::new())),stop:Arc::new(AtomicBool::new(false)),admission,forced_left:Mutex::new(vec![])})
     }
     pub fn is_steam(&self)->bool{self.steam.is_some()}
+    pub fn steam_ping(&self, peer: PeerId) -> Option<u16> {
+        self.steam.as_ref()?.lock().unwrap().ping(peer)
+    }
     pub fn lobby_code(&self)->Option<String>{self.steam.as_ref().and_then(|s|{let s=s.lock().unwrap();(s.lobby!=0).then(||s.lobby.to_string())})}
 
     /// Start hosting on `port` (all interfaces).
@@ -575,8 +580,10 @@ impl Net {
                     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
                     s.set_write_timeout(Some(Duration::from_secs(5))).ok();
                     s.write_all(&encode(&Packet::Hello { protocol: PROTOCOL, name })).map_err(|e| e.to_string())?;
+                    let my_id;
                     match read_packet(&mut s).map_err(|e| e.to_string())? {
                         Packet::Welcome { your_id, peers } => {
+                            my_id = your_id;
                             if stop.load(Ordering::Relaxed) { return Ok(()); }
                             s.set_read_timeout(None).ok();
                             let writer = spawn_writer(s.try_clone().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -595,6 +602,15 @@ impl Net {
                             Ok(Packet::Joined(p)) => drop(ev_tx.send(Event::Joined(p))),
                             Ok(Packet::Left(id)) => drop(ev_tx.send(Event::Left(id))),
                             Ok(Packet::Msg { from, msg }) if msg.checked_from(from) => {
+                                // Reply on the socket thread: the main thread polls at
+                                // 60 Hz and would quantize every RTT into frame times.
+                                if from == 0 {
+                                    if let Msg::Ping(token) = &msg {
+                                        if let Some(writer) = writers.lock().unwrap().get(&0) {
+                                            queue(writer, encode(&Packet::Msg { from: my_id, msg: Msg::Pong(*token) }));
+                                        }
+                                    }
+                                }
                                 if let Msg::StartRun { seed, .. } = &msg { crate::log(&format!("net: received run start {seed:016x} from peer {from}")); }
                                 if ev_tx.try_send(Event::Msg(from, msg)).is_err() { break; }
                             }
@@ -634,7 +650,7 @@ impl Net {
                     self.peers.push(p.clone());
                 }
                 Event::Left(id) => self.peers.retain(|q| q.id != *id),
-                Event::Msg(from, _) if !self.peers.iter().any(|p| p.id == *from) => continue,
+                Event::Msg(from, _) | Event::Pong { from, .. } if !self.peers.iter().any(|p| p.id == *from) => continue,
                 _ => {}
             }
             out.push(e);
@@ -746,6 +762,7 @@ fn host_conn(
     while !stop.load(Ordering::Relaxed) {
         match read_packet(&mut s) {
             Ok(Packet::Msg { msg, .. }) if msg.checked_from(me.id) => {
+                let received = Instant::now();
                 // Relay to other clients with the sender's real id (never trust `from`).
                 let frame = encode(&Packet::Msg { from: me.id, msg: msg.clone() });
                 let w = writers.lock().unwrap();
@@ -755,7 +772,10 @@ fn host_conn(
                         queue(tx, frame.clone());
                     }
                 }
-                if ev_tx.try_send(Event::Msg(me.id, msg)).is_err() { break; }
+                let event = if let Msg::Pong(token) = msg {
+                    Event::Pong { from: me.id, token, received }
+                } else { Event::Msg(me.id, msg) };
+                if ev_tx.try_send(event).is_err() { break; }
             }
             Ok(_) => {}
             Err(_) => break,

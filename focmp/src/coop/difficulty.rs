@@ -316,6 +316,5 @@ fn draw(g: G, c: &Coop, inst: V) {
         g.call("draw_set_halign", &[real(0.0)]);
         g.call("draw_set_valign", &[real(1.0)]);
     }
-    super::cursors::draw(g, c);
     for (name, value) in ["draw_set_color", "draw_set_alpha", "draw_set_font", "draw_set_halign", "draw_set_valign"].into_iter().zip(saved) { g.call(name, &[value]); }
 }

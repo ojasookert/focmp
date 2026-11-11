@@ -278,7 +278,10 @@ unsafe extern "C-unwind" fn camera_hud(s: *mut c_void, o: *mut c_void) {
     let f: unsafe extern "C-unwind" fn(*mut c_void, *mut c_void) =
         unsafe { std::mem::transmute(CAMERA_HUD.load(Ordering::Relaxed)) };
     unsafe { f(s, o) };
-    if let Some(g)=G::new(){if let Ok(c)=super::COOP.try_lock(){unsafe { super::pedestal::draw_world_prompt(g,&c,s,o); }}}
+    if let Some(g)=G::new(){if let Ok(c)=super::COOP.try_lock(){
+        unsafe { super::pedestal::draw_world_prompt(g,&c,s,o); }
+        unsafe { super::team_hud::draw(g, &c, s, o); }
+    }}
     let Some(g) = G::new().filter(|g| {
         active()
             && !ending()

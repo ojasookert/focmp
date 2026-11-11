@@ -33,6 +33,10 @@ pub(crate) mod rng;
 mod shot_events;
 pub(crate) mod map_lights;
 mod life;
+mod team_hud;
+mod latency;
+mod friend_lobbies;
+mod avatar_color;
 pub(crate) mod props;
 pub mod selection;
 pub mod travel;
@@ -76,6 +80,7 @@ pub struct Coop {
     pub projectiles: projectiles::Projectiles,
     lobby_sent: Option<Instant>,
     heartbeat_sent: Option<Instant>,
+    latency: latency::Latency,
     sent_gone: bool,
     /// Our own (level, sub, hash) for the current fight room.
     pub my_layout: Option<(u32, u32, u64)>,
@@ -104,6 +109,7 @@ pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
         projectiles: projectiles::Projectiles::default(),
         lobby_sent: None,
         heartbeat_sent: None,
+        latency: latency::Latency::default(),
         sent_gone: false,
         my_layout: None,
         room: String::new(),
@@ -168,6 +174,7 @@ impl Coop {
         life::reset();
         self.lobby_sent = None;
         self.heartbeat_sent = None;
+        self.latency = latency::Latency::default();
         self.sent_gone = false;
         self.room = g.room_name();
         self.room_frames = 0;
@@ -188,6 +195,10 @@ impl Coop {
         let (role, addr) = (net.role, net.addr.clone());
         for e in events {
             match e {
+                Event::Pong { from, token, received } => {
+                    if let Some(remote) = self.remotes.get_mut(&from) { remote.seen = received; }
+                    if role == Role::Host { self.latency.receive(from, token, received); }
+                }
                 Event::Connected { my_id, peers } => {
                     MY_ID.store(my_id, Ordering::Relaxed);
                     for p in peers.iter().filter(|p| p.id != my_id) {
@@ -200,6 +211,7 @@ impl Coop {
                     self.sent_gone = false;
                 }
                 Event::Joined(p) => {
+                    self.latency.reset_peer(p.id);
                     crate::log(&format!("coop: {} joined (peer {})", p.name, p.id));
                     self.ready[p.id as usize] = false;
                     self.colors[p.id as usize] = p.id;
@@ -207,6 +219,7 @@ impl Coop {
                     self.remotes.insert(p.id, Remote { room:String::new(),busy:false,name: p.name, state: None, seen: Instant::now(), layout: None });
                 }
                 Event::Left(id) => {
+                    self.latency.reset_peer(id);
                     if role == Role::Host {
                         economy::peer_left(g,id);
                         pedestal::peer_left(g,self,id);
@@ -270,7 +283,8 @@ impl Coop {
                         Msg::TeamGameOver{run} => {if from==0&&run==rooms::RUN_SEED.load(Ordering::Relaxed){life::game_over();}},
                         Msg::Ping(t) => {
                             if let Some(n) = &self.net {
-                                n.broadcast(Msg::Pong(t))
+                                // TCP host probes are answered by the reader thread.
+                                if n.is_steam() || from != 0 { n.broadcast(Msg::Pong(t)); }
                             }
                         }
                         Msg::Pong(_) => {}
@@ -295,8 +309,8 @@ impl Coop {
                                 self.lobby_sent = None;
                             }
                         }
-                        Msg::Lobby { ready, colors, .. } => {
-                            if from == 0 { self.ready = ready; self.colors = colors; }
+                        Msg::Lobby { ready, colors, ping_ms, .. } => {
+                            if from == 0 { self.ready = ready; self.colors = colors; self.latency.ms = ping_ms; }
                         }
                         Msg::MenuCursor { run, menu, x, y, visible } => cursors::receive(self, from, run, menu, x, y, visible),
                         msg @ (Msg::SelectionUpdate { .. } | Msg::SelectionState { .. } | Msg::SelectionAck { .. } | Msg::SelectionCommit { .. }) => selection::receive(self, from, msg),
@@ -356,7 +370,7 @@ impl Coop {
     fn send_lobby(&mut self) {
         let Some(n) = &self.net else { return };
         if n.role == Role::Host && self.lobby_sent.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
-            n.broadcast(Msg::Lobby { ready: self.ready, colors: self.colors, running: rooms::RUN_SEED.load(Ordering::Relaxed) != 0 });
+            n.broadcast(Msg::Lobby { ready: self.ready, colors: self.colors, ping_ms: self.latency.ms, running: rooms::RUN_SEED.load(Ordering::Relaxed) != 0 });
             self.lobby_sent = Some(Instant::now());
         }
     }
@@ -364,10 +378,25 @@ impl Coop {
     fn check_connections(&mut self, g: G) {
         let Some(n) = &self.net else { return };
         if !n.connected() { return; }
+        if n.role == Role::Client && self.remotes.get(&0).is_some_and(|r| r.seen.elapsed() >= Duration::from_secs(6)) {
+            // A frozen host link cannot deliver fresh lobby measurements.
+            self.latency.ms.fill(None);
+        }
         if self.heartbeat_sent.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
-            n.broadcast(Msg::Ping(0));
+            let token = if n.role == Role::Host && !n.is_steam() { self.latency.probe() } else { 0 };
+            if n.role == Role::Host && n.is_steam() {
+                for peer in n.peers.iter().filter(|p| p.id != 0) {
+                    let ping = self.remotes.get(&peer.id)
+                        .filter(|r| r.seen.elapsed() < Duration::from_secs(6))
+                        .and_then(|_| n.steam_ping(peer.id));
+                    if let Some(ms) = ping { self.latency.sample(peer.id, ms, Instant::now()); }
+                    else { self.latency.reset_peer(peer.id); }
+                }
+            }
+            n.broadcast(Msg::Ping(token));
             self.heartbeat_sent = Some(Instant::now());
         }
+        if n.role == Role::Host { self.latency.publish(); }
         let timed_out: Vec<_> = self.remotes.iter().filter(|(_, r)| r.seen.elapsed() >= Duration::from_secs(15)).map(|(id, _)| *id).collect();
         if n.role == Role::Client && timed_out.contains(&0) {
             self.leave(g);
@@ -646,6 +675,9 @@ pub fn frame() {
 pub fn console(args: &[String]) -> String {
     let Some(g) = G::new() else { return "error: runtime not ready".into() };
     let a: Vec<&str> = args.iter().map(|s| s.trim_start_matches('\u{1}')).collect();
+    if a.first() == Some(&"friends-preview") {
+        return menu::preview_friends(&mut COOP.lock().unwrap(), &a[1..]);
+    }
     if a==["map-lights"] {return map_lights::describe(g);}
     if a==["rng-check"] {return rng::check(g);}
     if a==["projectile-cache","forget"]{projectiles::forget_remote();return "remote shot cache discarded for recovery check".into();}
@@ -732,7 +764,8 @@ fn status(c: &Coop) -> String {
                 None => "no player in a room".into(),
             }
         };
-        s += &format!("  P{} {:<20} {} [{}]\n", id + 1, name, st, if c.ready[id as usize] { "ready" } else { "not ready" });
+        let ping = if id == 0 { String::new() } else { format!(" ping to host (ms): {}", latency::text(c.latency.ms[id as usize])) };
+        s += &format!("  P{} {:<20} {} [{}]{}\n", id + 1, name, st, if c.ready[id as usize] { "ready" } else { "not ready" }, ping);
     }
     let seed = rooms::RUN_SEED.load(Ordering::Relaxed);
     if seed != 0 {

@@ -448,16 +448,26 @@ pub fn receive(g: G, c: &super::Coop, from: PeerId, msg: Msg) {
             }
             last[from as usize] = id;
             let mut reserved = RESERVED.lock().unwrap();
-            let ok = reserved[from as usize].is_none()
-                && !c.travel.committed()
-                && (room == g.room_name()
-                    || (room == "Room_shop" && g.room_name().starts_with("Room_hub"))
-                    || (room.starts_with("Room_hub") && g.room_name() == "Room_shop")
-                    || (perk_reroll && room == "Room_select_perk_game"
-                        && (matches!(g.room_name().as_str(), "Room_shop" | "Room_new_unlocks")
-                            || g.room_name().starts_with("Room_hub"))))
-                && (level, sub) == super::rooms::level_sub(g)
-                && charge(g, cost);
+            let host_room = g.room_name();
+            // The wallet belongs to the shared run, not the host's current UI.
+            // A buyer must still be on a purchase screen in the same hub visit;
+            // the host may be choosing a pack card or applying any tool/glitch.
+            let purchase_screen = if perk_reroll {
+                room == "Room_select_perk_game"
+            } else {
+                matches!(room.as_str(), "Room_shop" | "Room_hub" | "Room_hub_1")
+            };
+            let denied = if reserved[from as usize].is_some() { Some("purchase already reserved") }
+                else if c.travel.committed() { Some("shared travel committed") }
+                else if !purchase_screen { Some("invalid purchase screen") }
+                else if !super::rooms::personal_hub_room(&host_room) { Some("host outside hub visit") }
+                else if (level, sub) != super::rooms::level_sub(g) { Some("different stage") }
+                else if !charge(g, cost) { Some("insufficient funds or invalid wallet/cost") }
+                else { None };
+            let ok = denied.is_none();
+            if let Some(reason) = denied {
+                crate::log(&format!("economy: rejected purchase {id} from peer {from}: {reason} (buyer {room} {level}.{sub}, host {host_room}, cost {cost})"));
+            }
             if ok {
                 reserved[from as usize] = Some((id, cost, perk_reroll));
             }

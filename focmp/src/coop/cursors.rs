@@ -78,8 +78,13 @@ pub fn tick(g: G, c: &mut Coop) {
     }
 }
 pub fn draw(g: G, c: &Coop) {
+    if rooms::RUN_SEED.load(Ordering::Relaxed) == 0 { return; }
     let (menu, _) = screen(g);
     if menu == 0 { return; }
+    // Called once after the native UI compositor, so its brightness/LUT
+    // cannot wash out the shared pointers or their player-colored labels.
+    let shader = g.call("shader_current", &[]);
+    g.call("shader_reset", &[]);
     let saved = [g.call("draw_get_color", &[]), g.call("draw_get_alpha", &[]), g.call("draw_get_font", &[]), g.call("draw_get_halign", &[]), g.call("draw_get_valign", &[])];
     g.call("draw_set_alpha", &[real(1.0)]);
     g.call("draw_set_font", &[g.global("Font_main_2x")]);
@@ -93,4 +98,5 @@ pub fn draw(g: G, c: &Coop) {
         }
     }
     for (name, value) in ["draw_set_color", "draw_set_alpha", "draw_set_font", "draw_set_halign", "draw_set_valign"].into_iter().zip(saved) { g.call(name, &[value]); }
+    if asset_id(shader) >= 0 { g.call("shader_set", &[shader]); }
 }

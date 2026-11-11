@@ -25,11 +25,59 @@ use crate::hooks::{self, ScriptFn};
 use crate::net::{DEFAULT_PORT, MAX_PLAYERS};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use crate::net::Role;
 
 static ACTION: Mutex<Option<String>> = Mutex::new(None);
+
+struct ColorLabel {
+    x: f64,
+    y: f64,
+    text: String,
+    color: f64,
+    align: f64,
+    font: V,
+    chip: Option<(f64, f64)>,
+    scale: f64,
+}
+static COLOR_LABELS: Mutex<Vec<ColorLabel>> = Mutex::new(Vec::new());
+struct PlainRect { x1: f64, y1: f64, x2: f64, y2: f64, color: f64 }
+static PING_RECTS: Mutex<Vec<PlainRect>> = Mutex::new(Vec::new());
+static PING_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+// Palette previews must show the actual player color, not the menu LUT's
+// replacement hue. Only these labels/swatches bypass the native UI effects.
+pub fn draw_color_labels(g: G, caller: *mut c_void, other: *mut c_void) {
+    let labels = std::mem::take(&mut *COLOR_LABELS.lock().unwrap());
+    let rects = std::mem::take(&mut *PING_RECTS.lock().unwrap());
+    if labels.is_empty() && rects.is_empty() { super::friend_lobbies::draw_avatars(g, caller, other); return; }
+    let saved = ["draw_get_color", "draw_get_alpha", "draw_get_font", "draw_get_halign", "draw_get_valign"].map(|n| g.call(n, &[]));
+    let shader = g.call("shader_current", &[]);
+    g.call("shader_reset", &[]);
+    g.call("draw_set_alpha", &[real(1.0)]);
+    g.call("draw_set_valign", &[real(1.0)]);
+    for rect in rects {
+        g.call("draw_set_color", &[real(rect.color)]);
+        g.call("draw_rectangle", &[real(rect.x1), real(rect.y1), real(rect.x2), real(rect.y2), crate::engine::boolean(false)]);
+    }
+    for label in labels {
+        g.call("draw_set_font", &[label.font]);
+        g.call("draw_set_halign", &[real(label.align)]);
+        for (offset, color) in [(1.0, 0.0), (0.0, label.color)] {
+            g.call("draw_set_color", &[real(color)]);
+            g.call("draw_text_transformed", &[real(label.x + offset), real(label.y + offset), g.s(&label.text), real(label.scale), real(label.scale), real(0.0)]);
+        }
+        if let Some((x, y)) = label.chip {
+            g.call("draw_set_color", &[real(label.color)]);
+            g.call("draw_rectangle", &[real(x), real(y - 4.0), real(x + 8.0), real(y + 4.0), crate::engine::boolean(false)]);
+        }
+    }
+    for (name, value) in ["draw_set_color", "draw_set_alpha", "draw_set_font", "draw_set_halign", "draw_set_valign"].into_iter().zip(saved) { g.call(name, &[value]); }
+    if crate::engine::asset_id(shader) >= 0 { g.call("shader_set", &[shader]); }
+    super::friend_lobbies::draw_avatars(g, caller, other);
+}
 
 const OPEN_PAGE: &str = "gml_Script_open_page@Menu_class@Menu_class";
 static ORIG_OPEN_PAGE: AtomicUsize = AtomicUsize::new(0);
@@ -41,6 +89,8 @@ const CONFIRM_PAGE: &str = "page_coop_confirm_start";
 // overlay callbacks). Only mutate pages at the start of a completed Menu.Step.
 static MENU_STEP: AtomicUsize = AtomicUsize::new(0);
 pub fn install(g: G) {
+    super::team_hud::install(g);
+    super::friend_lobbies::install(g);
     if MENU_STEP.load(Ordering::Relaxed) == 0 {
         match hooks::install(g.rt, "gml_Object_objMenu_Step_0", menu_step as *const ()) {
             Ok(f) => MENU_STEP.store(f as usize, Ordering::SeqCst),
@@ -117,8 +167,10 @@ pub struct MenuState {
     escape_down: bool,
     pending_invite: Option<u64>,
     invite_error: Option<String>,
-
+    friends: super::friend_lobbies::Panel,
 }
+
+pub(super) fn preview_friends(c: &mut Coop, ids: &[&str]) -> String { c.menu.friends.preview(ids) }
 
 enum Act {
     Open(&'static str),
@@ -160,7 +212,11 @@ pub fn tick(g: G, c: &mut Coop) {
                 let result = super::host_start_run(c, force);
                 crate::log(&format!("coop lobby: {result}"));
             }
-            _ => {}
+            _ => {
+                if let Some(index) = action.strip_prefix("page_coop_act_friend_").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(id) = c.menu.friends.lobby(index) { c.menu.pending_invite = Some(id); }
+                }
+            }
         }
     }
     // FOCMP_NO_MENU=1: leave the game's menu untouched (A/B testing).
@@ -208,6 +264,7 @@ pub fn tick(g: G, c: &mut Coop) {
     if LOBBY_PAGES.contains(&active.as_str()) || active == CONFIRM_PAGE {
         refresh_lobby(g, c, pages, &active);
     }
+    c.menu.friends.update(g, g.get(pages, "page_coop"), active == "page_coop");
 }
 
 /// Handle both overlay accepts and Steam's launch-time +connect_lobby argument.
@@ -345,7 +402,7 @@ fn build(g: G, pages: V) -> Result<(), String> {
         layout(g, arr);
         for i in 0..g.arr_len(arr) {
             let it = g.arr_get(arr, i);
-            g.set(it, "x2", real(g.num(it, "x1") + 240.0));
+            if name != "page_coop" { g.set(it, "x2", real(g.num(it, "x1") + 240.0)); }
         }
         g.set(page, "items", arr);
         // len_items is a native method, rebound by clone_page. It reads the
@@ -358,7 +415,7 @@ fn build(g: G, pages: V) -> Result<(), String> {
     mk_page("page_coop", "COOP", &[("host", Act::Open("page_coop_host")), ("join", Act::Open("page_coop_join")), ("back", Act::Back)])?;
     if crate::config::load().transport == crate::config::Transport::Steam {
         mk_page("page_coop_join", "JOIN", &[
-            ("Paste Steam lobby code", Act::Open("page_coop_lobby_clip")),
+            ("paste lobby code", Act::Open("page_coop_lobby_clip")),
             ("back", Act::Back),
         ])?;
     } else {
@@ -607,7 +664,9 @@ unsafe extern "C-unwind" fn hk_draw_page(s: *mut c_void, o: *mut c_void, ret: *m
     let f: ScriptFn = unsafe { std::mem::transmute(ORIG_DRAW.load(Ordering::Relaxed)) };
     let result=unsafe { f(s, o, ret, argc, args) };
     if let Some(g)=G::new(){if let Ok(c)=super::COOP.try_lock(){
-        super::ending::draw(g,V{v:s as u64,flags:0,kind:crate::gm::KIND_OBJECT},&c);
+        let page=V{v:s as u64,flags:0,kind:crate::gm::KIND_OBJECT};
+        super::ending::draw(g,page,&c);
+        c.menu.friends.draw(g,page);
     }}
     result
 }
@@ -615,6 +674,10 @@ unsafe extern "C-unwind" fn hk_draw_page(s: *mut c_void, o: *mut c_void, ret: *m
 fn rgb(r: u32, g: u32, b: u32) -> f64 { (r | g << 8 | b << 16) as f64 }
 
 fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
+    let mut color_labels = COLOR_LABELS.lock().unwrap();
+    color_labels.clear();
+    let mut ping_rects = PING_RECTS.lock().unwrap();
+    ping_rects.clear();
     let saved = [g.call("draw_get_color", &[]), g.call("draw_get_alpha", &[]), g.call("draw_get_font", &[]), g.call("draw_get_halign", &[]), g.call("draw_get_valign", &[])];
     g.call("draw_set_alpha", &[real(1.0)]);
     g.call("draw_set_font", &[g.get(page, "font_menu")]);
@@ -660,16 +723,37 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         };
         text(52.0, 80.0, &subtitle, muted);
         text(68.0, 113.0, "PLAYER", muted);
+        text(375.0, 113.0, "PING", muted);
+        color_labels.push(ColorLabel { x: 407.0, y: 113.0, text: "ms".into(), color: muted, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 0.75 });
         text(470.0, 113.0, "STATUS", muted);
         for slot in 0..MAX_PLAYERS {
             let y = 142.0 + slot as f64 * 35.0;
             rect(52.0, y - 14.0, 588.0, y + 14.0, rgb(17, 26, 29), false);
             match roster.get(slot) {
                 Some((id, name, me)) => {
-                    let name: String = name.chars().filter(|ch| !ch.is_control()).take(22).collect();
-                    text(68.0, y, &format!("{}  {}", id + 1, name), super::colors::value(c.colors[*id as usize]));
+                    let name: String = name.chars().filter(|ch| !ch.is_control() && *ch != '#').take(18).collect();
+                    color_labels.push(ColorLabel { x: 68.0, y, text: format!("{}  {}", id + 1, name), color: super::colors::value(c.colors[*id as usize]), align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 1.0 });
                     let tag = match (*id == 0, me) { (true, true) => "YOU / HOST", (true, false) => "HOST", (false, true) => "YOU", _ => "" };
-                    text(330.0, y, tag, muted);
+                    text(270.0, y, tag, muted);
+                    if *id != 0 {
+                        let ping = c.latency.ms[*id as usize];
+                        let lit = match ping { Some(0..=49) => 4, Some(50..=99) => 3, Some(100..=149) => 2, Some(_) => 1, None => 0 };
+                        let phase = PING_CLOCK.elapsed().as_millis() / 300;
+                        let bad = lit == 1;
+                        let blink = phase % 2 == 0;
+                        let dim = rgb(40, 60, 60);
+                        let pink = rgb(255, 60, 150);
+                        for bar in 0..4 {
+                            let color = if ping.is_none() && bar == (phase % 4) as usize { muted }
+                                else if bar < lit { if bad { if blink { pink } else { dim } } else { white } }
+                                else { dim };
+                            let x = 375.0 + bar as f64 * 5.0;
+                            // GameMaker includes the right/bottom pixel: 3px bars,
+                            // 2px gaps, and heights 3/6/9/12 require inclusive bounds.
+                            ping_rects.push(PlainRect { x1: x, y1: y + 7.0 - (bar + 1) as f64 * 3.0, x2: x + 2.0, y2: y + 6.0, color });
+                        }
+                        color_labels.push(ColorLabel { x: 401.0, y, text: super::latency::text(ping), color: if bad && blink { pink } else { muted }, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 1.0 });
+                    }
                     text(470.0, y, if c.ready[*id as usize] { "Ready" } else { "Not ready" }, if c.ready[*id as usize] { green } else { muted });
                 }
                 None => { text(68.0, y, "Open slot", muted); text(470.0, y, "Waiting", muted); }
@@ -696,6 +780,10 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
             rect(x1, y1, x2, y2, if enabled { accent } else { rgb(60, 70, 72) }, true);
         }
         let label = g.str_of(&g.get(item, "text"));
+        if enabled && truthy(&g.get(item, "focmp_color_button")) {
+            color_labels.push(ColorLabel { x: (x1+x2)/2.0, y: (y1+y2)/2.0, text: label, color: g.num(item, "focmp_color"), align: 1.0, font: g.get(page, "font_menu"), chip: Some((x1, (y1+y2)/2.0)), scale: 1.0 });
+            continue;
+        }
         g.call("draw_set_halign", &[real(1.0)]);
         text((x1 + x2) / 2.0, (y1 + y2) / 2.0, &label,
             if !enabled { rgb(92, 104, 105) } else if selected && !secondary { rgb(8, 14, 17) } else if truthy(&g.get(item, "focmp_color_button")) { g.num(item, "focmp_color") } else if secondary { accent } else { white });
