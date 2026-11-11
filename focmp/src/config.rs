@@ -1,5 +1,5 @@
 use bitcode::{Decode, Encode};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transport {
@@ -72,7 +72,15 @@ pub struct Config {
     /// web page posting to it, could run its commands.
     pub debug_console: bool,
 }
-pub fn load() -> Config {
+// One immutable snapshot for the process: menu ticks must not perform file I/O,
+// and transport selection must agree with the hooks installed at startup.
+static CONFIG: LazyLock<Config> = LazyLock::new(load);
+
+pub fn get() -> &'static Config {
+    &CONFIG
+}
+
+fn load() -> Config {
     let mut c = Config {
         transport: Transport::Tcp,
         rules: RunRules::default(),

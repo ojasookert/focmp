@@ -38,7 +38,7 @@ impl Browser {
 
     /// Synthetic portraits for the opt-in development console preview only.
     pub fn preview_avatar(&mut self, id: u64) {
-        if !crate::config::load().debug_console || self.avatars.contains_key(&id) { return; }
+        if !crate::config::get().debug_console || self.avatars.contains_key(&id) { return; }
         let mut rgba = vec![255; 64 * 64 * 4];
         for y in 0..64 { for x in 0..64 {
             let p = (y * 64 + x) * 4;

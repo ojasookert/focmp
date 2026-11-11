@@ -240,7 +240,7 @@ static LISTENER: Mutex<InviteListener> = Mutex::new(InviteListener {
     attempt: None,
 });
 static STEAM_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| crate::config::load().transport == crate::config::Transport::Steam);
+    LazyLock::new(|| crate::config::get().transport == crate::config::Transport::Steam);
 /// Called on the game thread once its startup services are ready.
 pub fn poll_invite() -> Option<u64> {
     if !*STEAM_ENABLED {

@@ -328,9 +328,9 @@ fn on_enter(g: G, c: &mut Coop, page: &str) {
         "page_coop_lobby_clip" => {
             let clip = g.str_of(&g.call("clipboard_get_text", &[])).trim().to_string();
             if clip.is_empty() || clip.len() > 64 || clip.contains(char::is_whitespace) {
-                c.status = if crate::config::load().transport==crate::config::Transport::Steam {"Copy the host’s Steam lobby code first"}else{"Copy the host address first (IP or host:port)"}.into();
+                c.status = if crate::config::get().transport==crate::config::Transport::Steam {"Copy the host’s Steam lobby code first"}else{"Copy the host address first (IP or host:port)"}.into();
             } else {
-                let addr = if crate::config::load().transport==crate::config::Transport::Steam || clip.contains(':') { clip } else { format!("{clip}:{DEFAULT_PORT}") };
+                let addr = if crate::config::get().transport==crate::config::Transport::Steam || clip.contains(':') { clip } else { format!("{clip}:{DEFAULT_PORT}") };
                 c.join(g, &addr);
             }
         }
@@ -413,7 +413,7 @@ fn build(g: G, pages: V) -> Result<(), String> {
     };
 
     mk_page("page_coop", "COOP", &[("host", Act::Open("page_coop_host")), ("join", Act::Open("page_coop_join")), ("back", Act::Back)])?;
-    if crate::config::load().transport == crate::config::Transport::Steam {
+    if crate::config::get().transport == crate::config::Transport::Steam {
         mk_page("page_coop_join", "JOIN", &[
             ("paste lobby code", Act::Open("page_coop_lobby_clip")),
             ("back", Act::Back),
@@ -439,7 +439,7 @@ fn build(g: G, pages: V) -> Result<(), String> {
             vec![("Ready", Act::Open("page_coop_act_ready")), ("Leave lobby", Act::Back), ("Color", Act::Open("page_coop_act_color"))]
         };
         let color_index=actions.len()-1;
-        if crate::config::load().transport==crate::config::Transport::Steam {
+        if crate::config::get().transport==crate::config::Transport::Steam {
             actions.push(("Copy lobby code",Act::Open("page_coop_act_copy")));
             actions.push(("Invite friends",Act::Open("page_coop_act_invite")));
         }
@@ -621,7 +621,7 @@ fn refresh_lobby(g: G, c: &mut Coop, pages: V, active: &str) {
     let items = g.get(g.get(pages, active), "items");
     let connected = c.net.as_ref().is_some_and(|n| n.connected() && n.my_id < MAX_PLAYERS as u8);
     let host = c.net.as_ref().is_some_and(|n| n.role == Role::Host);
-    if active!=CONFIRM_PAGE && crate::config::load().transport==crate::config::Transport::Steam {
+    if active!=CONFIRM_PAGE && crate::config::get().transport==crate::config::Transport::Steam {
         let steam = connected && c.net.as_ref().is_some_and(|n| n.is_steam());
         action(g,g.arr_get(items,g.arr_len(items)-2),steam,"page_coop_act_copy");
         action(g,g.arr_get(items,g.arr_len(items)-1),steam,"page_coop_act_invite");

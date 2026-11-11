@@ -120,7 +120,7 @@ pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
 impl Coop {
     pub fn host(&mut self, g: G, port: u16) {
         self.leave(g);
-        match if crate::config::load().transport==crate::config::Transport::Steam {Net::steam(Role::Host,"")}else{Net::host(port, crate::net::local_name())} {
+        match if crate::config::get().transport==crate::config::Transport::Steam {Net::steam(Role::Host,"")}else{Net::host(port, crate::net::local_name())} {
             Ok(n) => {
                 self.status = format!("hosting on {}", n.addr);
                 self.net = Some(n);
@@ -134,7 +134,7 @@ impl Coop {
 
     pub fn join(&mut self, g: G, addr: &str) {
         self.leave(g);
-        if crate::config::load().transport==crate::config::Transport::Steam {
+        if crate::config::get().transport==crate::config::Transport::Steam {
             match Net::steam(Role::Client,addr){Ok(n)=>self.net=Some(n),Err(e)=>{self.status=e;return;}}
         }else{self.net = Some(Net::join(addr, crate::net::local_name()));}
         self.status = format!("connecting to {addr}...");
@@ -510,7 +510,7 @@ pub fn host_start_run(c: &mut Coop, force: bool) -> String {
         h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         h.finish() | 1
     };
-    let mut rules = crate::config::load().rules;
+    let mut rules = crate::config::get().rules;
     rules.players = n.peers.len() as u8;
     *crate::config::RUN_RULES.lock().unwrap() = rules;
     crate::log(&format!("run settings: {rules:?}"));
@@ -705,7 +705,7 @@ pub fn console(args: &[String]) -> String {
             status(&c)
         }
         ["join", addr] => {
-            let addr = if crate::config::load().transport==crate::config::Transport::Steam || addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", crate::net::DEFAULT_PORT) };
+            let addr = if crate::config::get().transport==crate::config::Transport::Steam || addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", crate::net::DEFAULT_PORT) };
             c.join(g, &addr);
             status(&c)
         }

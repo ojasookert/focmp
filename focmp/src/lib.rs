@@ -182,7 +182,7 @@ pub extern "C" fn focmp_init() {
 
     input::install(&img);
 
-    if config::load().debug_console {
+    if config::get().debug_console {
         std::thread::spawn(serve);
     } else {
         log("debug console off (enable with [debug] console = true in focmp.ini)");

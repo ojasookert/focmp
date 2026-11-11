@@ -88,7 +88,7 @@ impl Panel {
     pub fn lobby(&self, index: usize) -> Option<u64> { self.lobbies.get(index).map(|l| l.id) }
 
     pub fn preview(&mut self, ids: &[&str]) -> String {
-        if !crate::config::load().debug_console { return "debug console required".into(); }
+        if !crate::config::get().debug_console { return "debug console required".into(); }
         if ids == ["off"] { self.preview = None; self.browser.pause(); return "friend preview disabled".into(); }
         if ids.len() > 99 { return "preview IDs (1..99), or off".into(); }
         let mut lobbies = Vec::new();
@@ -104,7 +104,7 @@ impl Panel {
 
     pub fn update(&mut self, g: G, page: V, active: bool) {
         if !crate::engine::is_struct(&page) { return; }
-        let enabled = active && crate::config::load().transport == crate::config::Transport::Steam;
+        let enabled = active && crate::config::get().transport == crate::config::Transport::Steam;
         let next = if enabled {
             self.preview.clone().unwrap_or_else(|| self.browser.poll().unwrap_or_else(|| self.lobbies.clone()))
         } else {
