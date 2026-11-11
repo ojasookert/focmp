@@ -327,6 +327,7 @@ struct Partial {
     parts: Vec<Option<Vec<u8>>>,
 }
 pub struct Steam {
+    game_build: u64,
     api: Api,
     role: Role,
     pub lobby: u64,
@@ -349,7 +350,7 @@ pub struct Steam {
     published_members: Option<i32>,
 }
 impl Steam {
-    pub fn new(role: Role, code: &str, admission: Arc<Mutex<Admission>>) -> Result<Self, String> {
+    pub fn new(role: Role, code: &str, admission: Arc<Mutex<Admission>>, game_build: u64) -> Result<Self, String> {
         let api = Api::load()?;
         let name = crate::net::steam_persona().ok_or("Steam persona unavailable")?;
         let lobby = if role == Role::Client {
@@ -382,6 +383,7 @@ impl Steam {
             return Err("Steam refused the lobby request".into());
         }
         Ok(Self {
+            game_build,
             api,
             role,
             lobby,
@@ -554,7 +556,7 @@ impl Steam {
     fn packet(&mut self, sender: u64, p: Packet) {
         if self.role == Role::Host {
             match p {
-                Packet::Hello { protocol, .. } => {
+                Packet::Hello { protocol, game_build, .. } => {
                     if protocol != PROTOCOL {
                         self.send(
                             sender,
@@ -564,6 +566,12 @@ impl Steam {
                                 ),
                             },
                         );
+                        return;
+                    }
+                    if game_build != self.game_build {
+                        self.send(sender, &Packet::Refused {
+                            reason: "Game versions differ. Everyone must use the same Flashes of Chaos version.".into(),
+                        });
                         return;
                     }
                     if let Some(&id) = self.peers.get(&sender) {
@@ -775,6 +783,7 @@ impl Steam {
                         self.owner,
                         &Packet::Hello {
                             protocol: PROTOCOL,
+                            game_build: self.game_build,
                             name: self.name.clone(),
                         },
                     );

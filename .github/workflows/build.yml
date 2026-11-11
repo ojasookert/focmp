@@ -151,7 +151,7 @@ jobs:
           games = ' or '.join(f"**{g['name']}**" for g in m.get('game_versions', []))
           if not games:
               raise SystemExit('manifest.json has no game_versions')
-          print(f"""Three-player co-op for Flashes of Chaos, via Steam lobbies. For game version {games}; everyone in a lobby needs the same FOCMP version.
+          print(f"""Three-player co-op for Flashes of Chaos, via Steam lobbies. Supports {games}; everyone in a lobby needs the same game version and FOCMP version.
 
           Unofficial and free. Brainburn Studio doesn't support or maintain it; report problems in [Issues](https://github.com/{repo}/issues).
 

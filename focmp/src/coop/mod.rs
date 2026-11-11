@@ -120,7 +120,7 @@ pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
 impl Coop {
     pub fn host(&mut self, g: G, port: u16) {
         self.leave(g);
-        match if crate::config::get().transport==crate::config::Transport::Steam {Net::steam(Role::Host,"")}else{Net::host(port, crate::net::local_name())} {
+        match if crate::config::get().transport==crate::config::Transport::Steam {Net::steam(Role::Host,"",g.rt.game_build)}else{Net::host(port, crate::net::local_name(),g.rt.game_build)} {
             Ok(n) => {
                 self.status = format!("hosting on {}", n.addr);
                 self.net = Some(n);
@@ -135,8 +135,8 @@ impl Coop {
     pub fn join(&mut self, g: G, addr: &str) {
         self.leave(g);
         if crate::config::get().transport==crate::config::Transport::Steam {
-            match Net::steam(Role::Client,addr){Ok(n)=>self.net=Some(n),Err(e)=>{self.status=e;return;}}
-        }else{self.net = Some(Net::join(addr, crate::net::local_name()));}
+            match Net::steam(Role::Client,addr,g.rt.game_build){Ok(n)=>self.net=Some(n),Err(e)=>{self.status=e;return;}}
+        }else{self.net = Some(Net::join(addr, crate::net::local_name(),g.rt.game_build));}
         self.status = format!("connecting to {addr}...");
         crate::log(&format!("coop: {}", self.status));
     }

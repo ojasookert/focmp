@@ -124,7 +124,9 @@ macro_rules! skip_hooks {
 }
 
 fn skip_enemy(s: *mut c_void, i: usize) -> bool {
-    if super::fuzz::active() && i >= 12 { return true; } // freeze QA wave spawning
+    if super::fuzz::active() && SKIP[i].0.starts_with("gml_Object_objWaveManager_") {
+        return true; // Freeze QA wave spawning, never an enemy's own alarms.
+    }
     if PUPPET_MODE.load(Ordering::Relaxed) {
         if matches!(i, 0 | 6 | 7 | 8 | 9) {
             if let Some(g) = G::new() {

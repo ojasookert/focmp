@@ -29,14 +29,31 @@ pub fn install(g: G) {
     if DRAW.load(Ordering::Relaxed) != 0 {
         return;
     }
-    // Verified native YYC adapters in this supported executable. Their ABI is
-    // typed floats, unlike the RValue-array builtin wrappers used by the console.
-    let base = crate::IMAGE_BASE.load(Ordering::Relaxed);
-    for (name, offset, f, slot) in [
-        ("yyc_draw_sprite_ext", 0xe262a0, sprite as *const (), &SPRITE),
-        ("yyc_draw_sprite", 0xe26200, simple as *const (), &SIMPLE),
+    // Verified typed-float YYC adapters, not the RValue-array builtin wrappers.
+    // Their RVAs move when game code changes; require a unique instruction signature.
+    let Ok(image) = crate::pe::Image::parse(crate::win::exe_base()) else { return; };
+    const EXT: &[u8] = &[
+        0x48, 0x89, 0x5c, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec, 0x70, 0x0f, 0x29,
+        0x74, 0x24, 0x60, 0x0f, 0x57, 0xc0, 0x0f, 0x2f, 0xc2, 0x8b, 0xfa, 0x48,
+        0x8b, 0xd9, 0x0f, 0x29, 0x7c, 0x24, 0x50, 0x0f, 0x28, 0xf2, 0x0f, 0x28,
+        0xfb, 0x76, 0x1f, 0x83, 0x79, 0x74, 0x01, 0x74, 0x11,
+    ];
+    const BASIC: &[u8] = &[
+        0x40, 0x53, 0x48, 0x83, 0xec, 0x40, 0x0f, 0x29, 0x74, 0x24, 0x30, 0x0f,
+        0x57, 0xc0, 0x0f, 0x2f, 0xc2, 0x8b, 0xda, 0x0f, 0x29, 0x7c, 0x24, 0x20,
+        0x0f, 0x28, 0xf2, 0x0f, 0x28, 0xfb, 0x76, 0x29, 0x83, 0x79, 0x74, 0x01,
+        0x74, 0x1b,
+    ];
+    for (name, signature, f, slot) in [
+        ("yyc_draw_sprite_ext", EXT, sprite as *const (), &SPRITE),
+        ("yyc_draw_sprite", BASIC, simple as *const (), &SIMPLE),
     ] {
-        match crate::hooks::install_address(name, base + offset, f) {
+        if slot.load(Ordering::Relaxed) != 0 { continue; }
+        let Some(address) = image.unique_text(signature, &[]) else {
+            crate::log(&format!("avatars: unsupported or ambiguous {name} adapter"));
+            return;
+        };
+        match crate::hooks::install_address(name, address, f) {
             Ok(p) => slot.store(p as usize, Ordering::SeqCst),
             Err(e) => {
                 crate::log(&e);

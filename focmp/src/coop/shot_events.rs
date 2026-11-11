@@ -149,13 +149,25 @@ static EVENTS: LazyLock<Vec<(&str, AtomicUsize)>> = LazyLock::new(|| {
         ("gml_Object_objWaitTrigger_Destroy_0", AtomicUsize::new(0)),
         ("gml_Object_objWaitTrigger_Step_0", AtomicUsize::new(0)),
         ("gml_Object_objWaitTrigger_Draw_0", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_Create_0", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_Step_0", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_Other_10", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_Other_11", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_Draw_0", AtomicUsize::new(0)),
+        ("gml_Object_objFloating_CleanUp_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_Create_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_Step_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_Draw_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_1_Create_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_1_Step_0", AtomicUsize::new(0)),
+        ("gml_Object_objDarkMatter_1_Draw_0", AtomicUsize::new(0)),
     ]
 });
 macro_rules! events {($($i:literal=>$name:ident),*)=>{
  $(unsafe extern "C-unwind" fn $name(s:*mut c_void,o:*mut c_void){unsafe{event(s,o,$i)}})*
  fn functions()->Vec<*const ()>{vec![$($name as *const ()),*]}
 }}
-events!(0=>e0,1=>e1,2=>e2,3=>e3,4=>e4,5=>e5,6=>e6,7=>e7,8=>e8,9=>e9,10=>e10,11=>e11,12=>e12,13=>e13,14=>e14,15=>e15,16=>e16,17=>e17,18=>e18,19=>e19,20=>e20,21=>e21,22=>e22,23=>e23,24=>e24,25=>e25,26=>e26,27=>e27,28=>e28,29=>e29,30=>e30,31=>e31,32=>e32,33=>e33,34=>e34,35=>e35,36=>e36,37=>e37,38=>e38,39=>e39,40=>e40,41=>e41,42=>e42,43=>e43,44=>e44,45=>e45,46=>e46,47=>e47,48=>e48,49=>e49,50=>e50,51=>e51,52=>e52,53=>e53,54=>e54,55=>e55,56=>e56,57=>e57,58=>e58,59=>e59,60=>e60,61=>e61,62=>e62,63=>e63,64=>e64,65=>e65,66=>e66,67=>e67,68=>e68,69=>e69,70=>e70,71=>e71);
+events!(0=>e0,1=>e1,2=>e2,3=>e3,4=>e4,5=>e5,6=>e6,7=>e7,8=>e8,9=>e9,10=>e10,11=>e11,12=>e12,13=>e13,14=>e14,15=>e15,16=>e16,17=>e17,18=>e18,19=>e19,20=>e20,21=>e21,22=>e22,23=>e23,24=>e24,25=>e25,26=>e26,27=>e27,28=>e28,29=>e29,30=>e30,31=>e31,32=>e32,33=>e33,34=>e34,35=>e35,36=>e36,37=>e37,38=>e38,39=>e39,40=>e40,41=>e41,42=>e42,43=>e43,44=>e44,45=>e45,46=>e46,47=>e47,48=>e48,49=>e49,50=>e50,51=>e51,52=>e52,53=>e53,54=>e54,55=>e55,56=>e56,57=>e57,58=>e58,59=>e59,60=>e60,61=>e61,62=>e62,63=>e63,64=>e64,65=>e65,66=>e66,67=>e67,68=>e68,69=>e69,70=>e70,71=>e71,72=>e72,73=>e73,74=>e74,75=>e75,76=>e76,77=>e77,78=>e78,79=>e79,80=>e80,81=>e81,82=>e82,83=>e83);
 pub fn install(g: G) {
     for (i, (name, slot)) in EVENTS.iter().enumerate() {
         if slot.load(Ordering::Relaxed) == 0 {

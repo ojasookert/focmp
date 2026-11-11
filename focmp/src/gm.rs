@@ -143,6 +143,9 @@ pub struct Runtime {
     pub builtin_vars: BTreeMap<String, usize>,
     /// (name, function address) for every compiled GML script and object event.
     pub scripts: Vec<(&'static str, usize)>,
+    /// Stable native-code identity, independent of ASLR. Shot method/asset
+    /// references must never cross between different game builds.
+    pub game_build: u64,
     pub function_add: usize,
     pub script_table: usize,
 }
@@ -152,6 +155,23 @@ unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 
 impl Runtime {
+    /// Verified anonymous-method renames between v1.0.01 hotfix and v1.0.02.
+    /// Never guess by method order or strip numeric suffixes: siblings share an ABI.
+    pub fn script(&self, name: &str) -> Option<usize> {
+        let renamed = match name {
+            "gml_Script_anon@6600@gml_Object_objMusic_Create_0" => "gml_Script_anon@6687@gml_Object_objMusic_Create_0",
+            "gml_Script_anon@9629@gml_Object_objPlayer_Other_11" => "gml_Script_anon@9819@gml_Object_objPlayer_Other_11",
+            "gml_Script_anon@1721@gml_Object_objGun_Create_0" => "gml_Script_anon@1740@gml_Object_objGun_Create_0",
+            "gml_Script_anon@22921@___struct___601@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@22972@___struct___601@gml_Object_objEnemyMASTER_Create_0",
+            "gml_Script_anon@21803@___struct___600@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@21854@___struct___600@gml_Object_objEnemyMASTER_Create_0",
+            "gml_Script_anon@22737@___struct___600@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@22788@___struct___600@gml_Object_objEnemyMASTER_Create_0",
+            _ => name,
+        };
+        self.scripts.iter().find(|(n, _)| *n == name)
+            .or_else(|| self.scripts.iter().find(|(n, _)| *n == renamed))
+            .map(|(_, address)| *address)
+    }
+
     pub fn scan(img: &Image) -> Result<Runtime, String> {
         // 1) Find Function_Add from the "instance_number" registration.
         let name = img.find_cstr("instance_number").ok_or("string instance_number not found")?;
@@ -228,7 +248,13 @@ impl Runtime {
             e += 24;
         }
 
-        Ok(Runtime { builtins, builtin_vars, scripts, function_add, script_table: start })
+        let mut game_build = 0xcbf29ce484222325u64;
+        for (name, address) in &scripts {
+            for byte in name.bytes().chain([0]).chain((*address - img.base).to_le_bytes()) {
+                game_build = (game_build ^ byte as u64).wrapping_mul(0x100000001b3);
+            }
+        }
+        Ok(Runtime { builtins, builtin_vars, scripts, game_build, function_add, script_table: start })
     }
 
     /// Read a built-in variable of a specific instance (raw `CInstance*`), e.g.

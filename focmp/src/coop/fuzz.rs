@@ -39,15 +39,23 @@ fn cleanup(g:G){
     // Melee hitboxes use a small native shot struct rather than a gun's tagged
     // definition. Destroy them before their enemy Owner can be removed.
     for hit in g.instances("objMeleeEnemy") {g.call("instance_destroy",&[hit]);}
-    // Snapshot before destroying, because instance indices change on removal.
-    let n=g.call("instance_number",&[real(-3.0)]).as_f64().unwrap_or(0.0) as usize;
-    let all:Vec<V>=(0..n).map(|i|g.call("instance_find",&[real(-3.0),real(i as f64)])).collect();
-    for inst in all {
-        if !g.exists(inst){continue;}
-        let shot=g.get(inst,"shot");
-        if is_struct(&shot)&&truthy(&g.get(shot,"focmp_fuzz_shot")) {
-            g.call("instance_destroy",&[inst]);
+    // Child effects can carry a network shot identity without retaining the
+    // tagged definition. Cleanup events may create more children, so drain them
+    // before the next case rather than leaving a previous shot in the arena.
+    for _ in 0..8 {
+        let mut removed = false;
+        // Snapshot before destroying, because instance indices change on removal.
+        let n=g.call("instance_number",&[real(-3.0)]).as_f64().unwrap_or(0.0) as usize;
+        let all:Vec<V>=(0..n).map(|i|g.call("instance_find",&[real(-3.0),real(i as f64)])).collect();
+        for inst in all {
+            if !g.exists(inst){continue;}
+            let shot=g.get(inst,"shot");
+            if g.num(inst,"focmp_shot_id") != 0.0 || (is_struct(&shot)&&truthy(&g.get(shot,"focmp_fuzz_shot"))) {
+                g.call("instance_destroy",&[inst,boolean(false)]);
+                removed = true;
+            }
         }
+        if !removed { break; }
     }
     for e in g.instances("objEnemyMASTER") {
         if truthy(&g.get(e,"focmp_fuzz_enemy")){destroy_enemy(g,e);}

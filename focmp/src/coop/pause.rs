@@ -34,6 +34,38 @@ pub fn block_for_step() { BLOCK_PLAYER.store(true, Ordering::Relaxed); }
 pub fn end_player() {
     BLOCK_PLAYER.store(false, Ordering::Relaxed);
 }
+// Controller.Step routes Escape/Start to dead_end_room for a dead player.
+// A co-op spectator still needs the native pause menu (and its normal input
+// bindings). Hide the death flag only while that controller handles the menu
+// press; never expose the temporary value to Player.Step or the network pump.
+pub unsafe fn controller_step(s: *mut c_void, o: *mut c_void, native: Event) {
+    let _pump = crate::block_pump();
+    struct RestoreDead(Option<(G, V, V)>);
+    impl Drop for RestoreDead {
+        fn drop(&mut self) {
+            if let Some((g, player, dead)) = self.0 {
+                if g.exists(player) {
+                    g.set(player, "dead", dead);
+                }
+            }
+        }
+    }
+    let saved = G::new().filter(|_| multiplayer() && !super::life::ending())
+        .and_then(|g| {
+            let player = g.first("objPlayer")?;
+            let dead = g.get(player, "dead");
+            if !crate::engine::truthy(&dead)
+                || crate::engine::truthy(&g.get(player, "revive"))
+                || !super::controls::pressed(g, 7)
+            {
+                return None;
+            }
+            g.set(player, "dead", boolean(false));
+            Some((g, player, dead))
+        });
+    let _restore = RestoreDead(saved);
+    unsafe { native(s, o) };
+}
 pub fn install(g: G) {
     for (name, f, slot) in [
         ("gml_Object_objPause_Create_0", create as *const (), &CREATE),

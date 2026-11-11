@@ -29,10 +29,8 @@ pub fn install(g: G) {
         Ok(p) => ENTER.store(p as usize, Ordering::SeqCst),
         Err(e) => crate::log(&e),
     }
-    if let Some((_, p)) = g.rt.scripts.iter().find(|(n, _)| {
-        *n == "gml_Script_anon@22737@___struct___600@gml_Object_objEnemyMASTER_Create_0"
-    }) {
-        EXIT.store(*p, Ordering::SeqCst);
+    if let Some(p) = g.rt.script("gml_Script_anon@22737@___struct___600@gml_Object_objEnemyMASTER_Create_0") {
+        EXIT.store(p, Ordering::SeqCst);
     }
 }
 // Clients receive the host's FSM state without running its gameplay entry.

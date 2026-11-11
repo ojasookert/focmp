@@ -650,7 +650,7 @@ unsafe extern "C-unwind" fn step(s: *mut c_void, o: *mut c_void) {
     CONTEXT.store(s as usize, Ordering::Relaxed);
     let f: Event = unsafe { std::mem::transmute(STEP.load(Ordering::Relaxed)) };
     unsafe {
-        f(s, o);
+        super::pause::controller_step(s, o, f);
     }
     let Some(g) = G::new() else {
         return;

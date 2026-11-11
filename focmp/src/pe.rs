@@ -16,6 +16,11 @@ impl Section {
     pub fn bytes(&self) -> &'static [u8] {
         unsafe { std::slice::from_raw_parts(self.start as *const u8, self.end - self.start) }
     }
+
+    pub fn slice(&self, addr: usize, len: usize) -> Option<&'static [u8]> {
+        (addr >= self.start && addr.checked_add(len)? <= self.end)
+            .then(|| unsafe { std::slice::from_raw_parts(addr as *const u8, len) })
+    }
 }
 
 pub struct Image {
@@ -30,6 +35,27 @@ unsafe fn rd<T: Copy>(addr: usize) -> T {
 }
 
 impl Image {
+    /// Resolve a verified native adapter only when its signature is unique.
+    /// Mask only relocation displacements; instruction bytes must still match.
+    pub fn unique_text(&self, pattern: &[u8], relocations: &[std::ops::Range<usize>]) -> Option<usize> {
+        if pattern.is_empty() { return None; }
+        let mut matches = self.text.bytes().windows(pattern.len()).enumerate().filter(|(_, bytes)| {
+            bytes.iter().zip(pattern).enumerate().all(|(i, (a, b))| {
+                a == b || relocations.iter().any(|range| range.contains(&i))
+            })
+        });
+        let (offset, _) = matches.next()?;
+        matches.next().is_none().then_some(self.text.start + offset)
+    }
+
+    /// Target of a RIP-relative operand with a four-byte displacement.
+    pub fn rip_target(&self, instruction: usize, displacement: usize) -> Option<usize> {
+        let at = instruction.checked_add(displacement)?;
+        let bytes = self.text.slice(at, 4)?;
+        let relative = i32::from_le_bytes(bytes.try_into().ok()?);
+        Some((at + 4).wrapping_add_signed(relative as isize))
+    }
+
     pub fn parse(base: usize) -> Result<Image, String> {
         unsafe {
             if rd::<u16>(base) != 0x5a4d {

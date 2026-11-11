@@ -29,7 +29,7 @@ pub fn install(rt: &Runtime, name: &str, hook: *const ()) -> Result<*const (), S
     if let Some(h) = hooks.get(name) {
         return Ok(h.detour.trampoline() as *const ());
     }
-    let addr = rt.scripts.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+    let addr = rt.script(name)
         .or_else(|| rt.builtins.get(name).copied())
         .ok_or_else(|| format!("runtime function {name} not found"))?;
     let detour = unsafe { RawDetour::new(addr as *const (), hook) }.map_err(|e| format!("detour {name}: {e}"))?;

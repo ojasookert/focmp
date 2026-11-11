@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 32;
+pub const PROTOCOL: u32 = 33;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -392,7 +392,7 @@ pub fn dq_angle(a: u8) -> f64 {
 
 #[derive(Encode, Decode, Clone, Debug)]
 pub(crate) enum Packet {
-    Hello { protocol: u32, name: String },
+    Hello { protocol: u32, game_build: u64, name: String },
     Welcome { your_id: PeerId, peers: Vec<PeerInfo> },
     Refused { reason: String },
     Joined(PeerInfo),
@@ -501,10 +501,10 @@ fn spawn_writer(mut s: TcpStream) -> std::io::Result<Writer> {
 }
 
 impl Net {
-    pub fn steam(role:Role,code:&str)->Result<Self,String>{
+    pub fn steam(role:Role,code:&str,game_build:u64)->Result<Self,String>{
         let (_,events)=sync_channel(1);
         let admission=Arc::new(Mutex::new(Admission::default()));
-        let steam=crate::steam::Steam::new(role,code,admission.clone())?;
+        let steam=crate::steam::Steam::new(role,code,admission.clone(),game_build)?;
         Ok(Self{steam:Some(Mutex::new(steam)),role,my_id:if role==Role::Host{0}else{255},peers:vec![],addr:"Steam lobby pending".into(),events,writers:Arc::new(Mutex::new(HashMap::new())),stop:Arc::new(AtomicBool::new(false)),admission,forced_left:Mutex::new(vec![])})
     }
     pub fn is_steam(&self)->bool{self.steam.is_some()}
@@ -514,7 +514,7 @@ impl Net {
     pub fn lobby_code(&self)->Option<String>{self.steam.as_ref().and_then(|s|{let s=s.lock().unwrap();(s.lobby!=0).then(||s.lobby.to_string())})}
 
     /// Start hosting on `port` (all interfaces).
-    pub fn host(port: u16, name: String) -> Result<Net, String> {
+    pub fn host(port: u16, name: String, game_build: u64) -> Result<Net, String> {
         let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("bind :{port}: {e}"))?;
         let listener_port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let (ev_tx, events) = sync_channel(1024);
@@ -530,7 +530,7 @@ impl Net {
                         Ok((s, addr)) => {
                             s.set_nonblocking(false).ok();
                             let (writers, admission, stop, ev_tx) = (writers.clone(), admission.clone(), stop.clone(), ev_tx.clone());
-                            std::thread::spawn(move || host_conn(s, addr, writers, admission, stop, ev_tx));
+                            std::thread::spawn(move || host_conn(s, addr, writers, admission, stop, ev_tx, game_build));
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(50))
@@ -560,7 +560,7 @@ impl Net {
 
     /// Connect to a host. Connecting happens on a background thread; watch
     /// `poll()` for `Connected` or `Failed`.
-    pub fn join(addr: &str, name: String) -> Net {
+    pub fn join(addr: &str, name: String, game_build: u64) -> Net {
         let (ev_tx, events) = sync_channel(1024);
         let writers: Writers = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -579,7 +579,7 @@ impl Net {
                     s.set_nodelay(true).ok();
                     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
                     s.set_write_timeout(Some(Duration::from_secs(5))).ok();
-                    s.write_all(&encode(&Packet::Hello { protocol: PROTOCOL, name })).map_err(|e| e.to_string())?;
+                    s.write_all(&encode(&Packet::Hello { protocol: PROTOCOL, game_build, name })).map_err(|e| e.to_string())?;
                     let my_id;
                     match read_packet(&mut s).map_err(|e| e.to_string())? {
                         Packet::Welcome { your_id, peers } => {
@@ -720,12 +720,21 @@ fn host_conn(
     admission: Arc<Mutex<Admission>>,
     stop: Arc<AtomicBool>,
     ev_tx: SyncSender<Event>,
+    game_build: u64,
 ) {
     s.set_nodelay(true).ok();
     s.set_read_timeout(Some(Duration::from_secs(5))).ok();
     s.set_write_timeout(Some(Duration::from_secs(5))).ok();
     let name = match read_packet(&mut s) {
-        Ok(Packet::Hello { protocol, name }) if protocol == PROTOCOL => name.chars().take(32).collect::<String>(),
+        Ok(Packet::Hello { protocol, game_build: peer_build, name }) if protocol == PROTOCOL => {
+            if peer_build != game_build {
+                let _ = s.write_all(&encode(&Packet::Refused {
+                    reason: "Game versions differ. Everyone must use the same Flashes of Chaos version.".into(),
+                }));
+                return;
+            }
+            name.chars().take(32).collect::<String>()
+        }
         Ok(Packet::Hello { protocol, .. }) => {
             let _ = s.write_all(&encode(&Packet::Refused {
                 reason: format!("version mismatch (host {PROTOCOL}, you {protocol})"),
