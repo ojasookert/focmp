@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 34;
+pub const PROTOCOL: u32 = 35;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -325,7 +325,9 @@ impl EnemyFire {
 }
 
 #[derive(Encode, Decode, Clone, Debug)]
-pub struct EnemyDeath { pub gid:u16, pub x:f32, pub y:f32, pub angle:f32, pub vx:f32, pub vy:f32, pub kx:f32, pub ky:f32 }
+pub struct EnemyDeath { pub gid:u16, pub x:f32, pub y:f32, pub angle:f32, pub vx:f32, pub vy:f32, pub kx:f32, pub ky:f32,
+    /// The enemy's `dmg_type_last`: since game v1.0.03 it selects the corpse sprite.
+    pub dtype:Option<i16> }
 
 /// Enemy changes since the previous tick. `keyframe` = full list (every ~1 s):
 /// the receiver drops enemies that aren't in it.

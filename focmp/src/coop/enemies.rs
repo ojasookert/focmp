@@ -45,8 +45,10 @@ unsafe extern "C-unwind" fn death_enter(s:*mut c_void,o:*mut c_void,ret:*mut V,a
                 let gid=g.num(e,"focmp_gid") as u16;
                 if gid!=0 {
                     let v=g.get(e,"v2_vel");let k=g.get(e,"v2_knockback");
+                    // Only the host's set_damage records the killing damage type.
+                    let dtype=g.get(e,"dmg_type_last").as_f64().filter(|t|t.fract()==0.0&&t.abs()<i16::MAX as f64).map(|t|t as i16);
                     DEATHS.lock().unwrap().push(EnemyDeath{gid,x:g.num(e,"x") as f32,y:g.num(e,"y") as f32,angle:g.num(e,"image_angle") as f32,
-                        vx:g.num(v,"x") as f32,vy:g.num(v,"y") as f32,kx:g.num(k,"x") as f32,ky:g.num(k,"y") as f32});
+                        vx:g.num(v,"x") as f32,vy:g.num(v,"y") as f32,kx:g.num(k,"x") as f32,ky:g.num(k,"y") as f32,dtype});
                 }
             }
         }
@@ -58,6 +60,8 @@ fn play_death(s:*mut c_void) {
     let gid=g.num(e,"focmp_gid") as u16;
     let Some(d)=PENDING_DEATH.lock().unwrap().remove(&gid) else{return};
     for (k,v) in [("x",d.x),("y",d.y),("image_angle",d.angle)] {g.set(e,k,real(v as f64));}
+    // The native death entry picks the corpse sprite (plasma, black hole, ...) from this.
+    if let Some(dtype)=d.dtype {g.set(e,"dmg_type_last",real(dtype as f64));}
     for (name,x,y) in [("v2_vel",d.vx,d.vy),("v2_knockback",d.kx,d.ky)] {
         let v=g.get(e,name);g.set(v,"x",real(x as f64));g.set(v,"y",real(y as f64));
     }

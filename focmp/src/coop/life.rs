@@ -292,7 +292,7 @@ unsafe extern "C-unwind" fn camera_hud(s: *mut c_void, o: *mut c_void) {
     };
     let selected = SPECTATING.lock().unwrap().clone();
     let text = if let Some((_, name)) = selected {
-        format!("SPECTATING {}  {}\nRevive in the next room", name.replace('[', "[["), super::controls::hint(g, 6))
+        format!("SPECTATING {}  {}\nRevive in the next room", name.replace('[', "[["), super::controls::hint(g, super::controls::inventory()))
     } else {
         "Waiting for the team".into()
     };

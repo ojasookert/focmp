@@ -672,7 +672,10 @@ unsafe extern "C-unwind" fn step(s: *mut c_void, o: *mut c_void) {
         return;
     }
     let input: crate::hooks::ScriptFn = unsafe { std::mem::transmute(a) };
-    let mut v = real(8.0);
+    let Some(accept) = super::controls::accept() else {
+        return;
+    };
+    let mut v = real(accept as f64);
     let mut args = [&mut v as *mut V];
     let mut ret = V::undefined();
     unsafe {
@@ -735,8 +738,8 @@ unsafe fn draw_prompt(g: G, c: &Coop, s: *mut c_void, o: *mut c_void) {
     let Some((i, _)) = inventory(g) else {
         return;
     };
-    let inventory_hint = super::controls::hint(g, 6);
-    let interact_hint = super::controls::hint(g, 8);
+    let inventory_hint = super::controls::hint(g, super::controls::inventory());
+    let interact_hint = super::controls::hint(g, super::controls::accept());
     let label = if waiting(&c.pedestal) {
         "Trading..."
     } else if c.pedestal.card.is_some() {

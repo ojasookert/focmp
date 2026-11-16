@@ -155,21 +155,29 @@ unsafe impl Send for Runtime {}
 unsafe impl Sync for Runtime {}
 
 impl Runtime {
-    /// Verified anonymous-method renames between v1.0.01 hotfix and v1.0.02.
+    /// Verified anonymous-method renames. Callers use the v1.0.01 hotfix name
+    /// (first column); later builds renumber the same method (v1.0.02, v1.0.03).
+    /// Each name exists in exactly one supported build, as that method only.
     /// Never guess by method order or strip numeric suffixes: siblings share an ABI.
+    const RENAMED: &[&[&str]] = &[
+        &["gml_Script_anon@6600@gml_Object_objMusic_Create_0", "gml_Script_anon@6687@gml_Object_objMusic_Create_0", "gml_Script_anon@6728@gml_Object_objMusic_Create_0"],
+        &["gml_Script_anon@9629@gml_Object_objPlayer_Other_11", "gml_Script_anon@9819@gml_Object_objPlayer_Other_11", "gml_Script_anon@10922@gml_Object_objPlayer_Other_11"],
+        &["gml_Script_anon@1721@gml_Object_objGun_Create_0", "gml_Script_anon@1740@gml_Object_objGun_Create_0", "gml_Script_anon@1775@gml_Object_objGun_Create_0"],
+        &["gml_Script_anon@22921@___struct___601@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@22972@___struct___601@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@23159@___struct___601@gml_Object_objEnemyMASTER_Create_0"],
+        &["gml_Script_anon@21803@___struct___600@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@21854@___struct___600@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@22054@___struct___600@gml_Object_objEnemyMASTER_Create_0"],
+        &["gml_Script_anon@22737@___struct___600@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@22788@___struct___600@gml_Object_objEnemyMASTER_Create_0", "gml_Script_anon@22975@___struct___600@gml_Object_objEnemyMASTER_Create_0"],
+        &["gml_Script_anon@1212@___struct___574@gml_Object_objEnemyBoom_Create_0", "gml_Script_anon@1295@___struct___574@gml_Object_objEnemyBoom_Create_0"],
+        &["gml_Script_anon@1369@___struct___588@gml_Object_objEnemyDog_Create_0", "gml_Script_anon@1445@___struct___588@gml_Object_objEnemyDog_Create_0"],
+        &["gml_Script_draw@anon@3952@UI_card@Button", "gml_Script_draw@anon@4061@UI_card@Button"],
+        &["gml_Script_select_up@anon@6017@UI_card@Button", "gml_Script_select_up@anon@6126@UI_card@Button"],
+        &["gml_Script_deselect@anon@6616@UI_card@Button", "gml_Script_deselect@anon@6725@UI_card@Button"],
+    ];
+
     pub fn script(&self, name: &str) -> Option<usize> {
-        let renamed = match name {
-            "gml_Script_anon@6600@gml_Object_objMusic_Create_0" => "gml_Script_anon@6687@gml_Object_objMusic_Create_0",
-            "gml_Script_anon@9629@gml_Object_objPlayer_Other_11" => "gml_Script_anon@9819@gml_Object_objPlayer_Other_11",
-            "gml_Script_anon@1721@gml_Object_objGun_Create_0" => "gml_Script_anon@1740@gml_Object_objGun_Create_0",
-            "gml_Script_anon@22921@___struct___601@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@22972@___struct___601@gml_Object_objEnemyMASTER_Create_0",
-            "gml_Script_anon@21803@___struct___600@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@21854@___struct___600@gml_Object_objEnemyMASTER_Create_0",
-            "gml_Script_anon@22737@___struct___600@gml_Object_objEnemyMASTER_Create_0" => "gml_Script_anon@22788@___struct___600@gml_Object_objEnemyMASTER_Create_0",
-            _ => name,
-        };
-        self.scripts.iter().find(|(n, _)| *n == name)
-            .or_else(|| self.scripts.iter().find(|(n, _)| *n == renamed))
-            .map(|(_, address)| *address)
+        let find = |wanted: &str| self.scripts.iter().find(|(n, _)| *n == wanted).map(|(_, address)| *address);
+        find(name).or_else(|| {
+            Self::RENAMED.iter().find(|names| names[0] == name)?.iter().skip(1).find_map(|renamed| find(renamed))
+        })
     }
 
     pub fn scan(img: &Image) -> Result<Runtime, String> {

@@ -573,7 +573,7 @@ pub unsafe fn filter_input(s: *mut std::ffi::c_void, n: i32, a: *mut *mut V, r: 
         || !truthy(&unsafe { *r })
         || n < 1
         || a.is_null()
-        || unsafe { (*a).is_null() || (**a).as_f64() != Some(8.0) }
+        || unsafe { (*a).is_null() || !super::controls::is_accept(&**a) }
     {
         return;
     }

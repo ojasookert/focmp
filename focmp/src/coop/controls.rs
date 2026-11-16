@@ -1,13 +1,24 @@
 //! Use the game's bound actions and active device for mod-only controls.
 use crate::engine::{G, V, real, truthy};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-// Native verbs occupy 0..24 in the supported game build. Register before
-// devices/clusters initialize and before saved bindings are imported.
-const PLACE_CARD: u8 = 24;
+// Native verb numbers differ between game builds (v1.0.03 inserted FIRERATE at
+// 6 and moved every later verb up). Never hard-code them: record each by its
+// export name while the game defines it, and give Place card the next free
+// number. Register before devices/clusters initialize and before saved
+// bindings are imported.
+const UNKNOWN: u8 = u8::MAX;
+static INVENTORY: AtomicU8 = AtomicU8::new(UNKNOWN);
+static PAUSE: AtomicU8 = AtomicU8::new(UNKNOWN);
+static ACCEPT: AtomicU8 = AtomicU8::new(UNKNOWN);
+static PLACE_CARD: AtomicU8 = AtomicU8::new(UNKNOWN);
+/// One past the highest verb the game defined itself.
+static NATIVE_VERBS: AtomicU8 = AtomicU8::new(0);
+static FIRERATE: AtomicBool = AtomicBool::new(false);
+static CONFIGURING: AtomicBool = AtomicBool::new(false);
 static CONFIG: AtomicUsize = AtomicUsize::new(0);
-static REGISTERED: AtomicBool = AtomicBool::new(false);
+static DEFINE: AtomicUsize = AtomicUsize::new(0);
 static LEGEND: AtomicUsize = AtomicUsize::new(0);
 
 pub fn install() {
@@ -16,38 +27,91 @@ pub fn install() {
         Ok(f) => LEGEND.store(f as usize, Ordering::SeqCst),
         Err(e) => crate::log(&format!("controls legend: {e}")),
     }
+    // Observe definitions before the configuration that makes them is hooked.
+    match crate::hooks::install(g.rt, "gml_Script_InputDefineVerb", define as *const ()) {
+        Ok(f) => DEFINE.store(f as usize, Ordering::SeqCst),
+        Err(e) => crate::log(&format!("controls: {e}")),
+    }
     match crate::hooks::install(g.rt, "gml_Script___InputConfigVerbs", configure as *const ()) {
         Ok(f) => CONFIG.store(f as usize, Ordering::SeqCst),
         Err(e) => crate::log(&format!("controls: {e}")),
     }
 }
+// InputDefineVerb(index, exportName, keyboard, gamepad, metadata).
+unsafe extern "C-unwind" fn define(s: *mut c_void, o: *mut c_void, r: *mut V, n: i32, a: *mut *mut V) -> *mut V {
+    if CONFIGURING.load(Ordering::Relaxed) && n >= 2 && !a.is_null() {
+        let (index, name) = unsafe { (*a, *a.add(1)) };
+        if !index.is_null() && !name.is_null() {
+            if let (Some(index), Some(name)) = unsafe { ((*index).as_f64(), (*name).as_str()) } {
+                if (0.0..UNKNOWN as f64).contains(&index) {
+                    let index = index as u8;
+                    NATIVE_VERBS.fetch_max(index + 1, Ordering::Relaxed);
+                    match name.as_str() {
+                        "INVENTORY" => INVENTORY.store(index, Ordering::Relaxed),
+                        "PAUSE" => PAUSE.store(index, Ordering::Relaxed),
+                        "ACCEPT" => ACCEPT.store(index, Ordering::Relaxed),
+                        "FIRERATE" => FIRERATE.store(true, Ordering::Relaxed),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let original: crate::hooks::ScriptFn = unsafe { std::mem::transmute(DEFINE.load(Ordering::Relaxed)) };
+    unsafe { original(s, o, r, n, a) }
+}
 unsafe extern "C-unwind" fn configure(s: *mut c_void, o: *mut c_void, r: *mut V, n: i32, a: *mut *mut V) -> *mut V {
     let original: crate::hooks::ScriptFn = unsafe { std::mem::transmute(CONFIG.load(Ordering::Relaxed)) };
+    CONFIGURING.store(true, Ordering::Relaxed);
     let result = unsafe { original(s, o, r, n, a) };
+    CONFIGURING.store(false, Ordering::Relaxed);
+    let place = NATIVE_VERBS.load(Ordering::Relaxed);
+    let number = |verb: Option<u8>| verb.map_or_else(|| "unknown".to_string(), |v| v.to_string());
+    crate::log(&format!("controls: {place} native verbs (inventory {}, pause {}, accept {})", number(inventory()), number(pause()), number(accept())));
+    if place == 0 || place == UNKNOWN {
+        crate::log("controls: native verbs were not observed; Place card is unavailable");
+        return result;
+    }
     if let Some(g) = G::new() {
         // A stable export name lets native imports retain this action across
         // builds, while older binding files simply leave its defaults intact.
         // Native rebinding always exposes two slots. A scalar default would
         // create a one-slot action and make selecting Alternate invalid.
+        // v1.0.03 binds its own fire-control switch to G; stay clear of it.
+        let key = if FIRERATE.load(Ordering::Relaxed) { b'C' } else { b'G' };
         let keyboard = g.call("array_create", &[real(2.0), V::undefined()]);
         g.call("variable_global_set", &[g.s("focmp_place_keyboard_defaults"), keyboard]);
-        g.call("array_set", &[keyboard, real(0.0), real(71.0)]);
+        g.call("array_set", &[keyboard, real(0.0), real(key as f64)]);
         let gamepad = g.call("array_create", &[real(2.0), V::undefined()]);
         g.call("variable_global_set", &[g.s("focmp_place_gamepad_defaults"), gamepad]);
         g.call("array_set", &[gamepad, real(0.0), real(32780.0)]);
         unsafe { script(g, "gml_Script_InputDefineVerb", s, o, &mut [
-            real(PLACE_CARD as f64), g.s("focmp_place_card"), keyboard, gamepad, V::undefined(),
+            real(place as f64), g.s("focmp_place_card"), keyboard, gamepad, V::undefined(),
         ]); }
-        REGISTERED.store(true, Ordering::Release);
-        crate::log("controls: registered Place card (G / right-stick click)");
+        PLACE_CARD.store(place, Ordering::Release);
+        crate::log(&format!("controls: registered Place card as verb {place} ({} / right-stick click)", key as char));
     }
     result
+}
+fn known(verb: &AtomicU8) -> Option<u8> {
+    Some(verb.load(Ordering::Acquire)).filter(|v| *v != UNKNOWN)
+}
+/// Inventory (Tab / View-Back).
+pub fn inventory() -> Option<u8> { known(&INVENTORY) }
+/// Pause (Escape / Start).
+pub fn pause() -> Option<u8> { known(&PAUSE) }
+/// Accept / interact (E / A).
+pub fn accept() -> Option<u8> { known(&ACCEPT) }
+fn place() -> Option<u8> { known(&PLACE_CARD) }
+/// Whether the verb argument of a native Input call is accept / interact.
+pub fn is_accept(verb: &V) -> bool {
+    accept().is_some_and(|a| verb.as_f64() == Some(a as f64))
 }
 
 /// Extend the existing UI binding page. Its native rebinding object owns
 /// capture, primary/alternate slots, per-device editing, saving and reset.
 pub fn extend_menu(g: G, pages: V) {
-    if !REGISTERED.load(Ordering::Acquire) { return; }
+    let Some(place) = place() else { return };
     let page = g.get(pages, "page_bindings_UI");
     if !crate::engine::is_struct(&page) || crate::engine::is_struct(&g.get(page, "focmp_place_binding")) { return; }
     let items = g.get(page, "items");
@@ -56,7 +120,7 @@ pub fn extend_menu(g: G, pages: V) {
     let item = g.call("variable_clone", &[g.arr_get(items, 0)]);
     g.set(page, "focmp_place_binding", item); // Root before allocating the array.
     g.set(item, "text", g.s("place card"));
-    g.set(item, "script_var", real(PLACE_CARD as f64));
+    g.set(item, "script_var", real(place as f64));
     let at = (0..count).find(|i| g.str_of(&g.get(g.arr_get(items, *i), "text")) == "sell").map_or(count - 1, |i| i + 1);
     g.call("array_insert", &[items, real(at as f64), item]);
     super::menu::layout(g, items);
@@ -68,18 +132,19 @@ fn call(g: G, name: &str, args: &[V]) -> V {
     values.extend_from_slice(args);
     g.call("script_execute", &values)
 }
-pub fn pressed(g: G, action: u8) -> bool {
-    truthy(&call(g, "InputPressed", &[real(action as f64)]))
+// An unresolved verb is never pressed and has no hint: passing an undefined
+// verb number to the Input library is a GML error.
+pub fn pressed(g: G, action: Option<u8>) -> bool {
+    action.is_some_and(|a| truthy(&call(g, "InputPressed", &[real(a as f64)])))
 }
-pub fn hint(g: G, action: u8) -> String {
-    g.str_of(&call(g, "input_get_binding_text", &[real(action as f64)]))
+pub fn hint(g: G, action: Option<u8>) -> String {
+    action.map_or_else(String::new, |a| g.str_of(&call(g, "input_get_binding_text", &[real(a as f64)])))
 }
-// Native action 6 is inventory (Tab / View-Back).
 pub fn inventory_pressed(g: G) -> bool {
-    pressed(g, 6)
+    pressed(g, inventory())
 }
 pub fn place_pressed(g: G) -> bool {
-    REGISTERED.load(Ordering::Acquire) && pressed(g, PLACE_CARD)
+    pressed(g, place())
 }
 
 // The game's icon set stops at the triggers/menu buttons. Supply the missing
@@ -97,9 +162,8 @@ pub unsafe fn draw_text(g: G, s: *mut std::ffi::c_void, o: *mut std::ffi::c_void
     unsafe { script(g, "gml_Script_draw_text_scribble", s, o, &mut [real(x), real(y), g.s(text)]); }
 }
 pub unsafe fn place_hint(g: G, s: *mut std::ffi::c_void, o: *mut std::ffi::c_void) -> String {
-    use std::sync::atomic::Ordering;
-    if !REGISTERED.load(Ordering::Acquire) { return String::new(); }
-    let binding = hint(g, PLACE_CARD);
+    if place().is_none() { return String::new(); }
+    let binding = hint(g, place());
     if !right_stick_binding(&binding) { return binding; }
     if STICK_ICON.load(Ordering::Relaxed) < 0 {
         const PIXELS: [&str; 13] = [
@@ -157,13 +221,13 @@ unsafe extern "C-unwind" fn legend(s: *mut c_void, o: *mut c_void, r: *mut V, n:
     result
 }
 unsafe fn draw_legend_addition(g: G, s: *mut c_void, o: *mut c_void) {
-    if !REGISTERED.load(Ordering::Acquire) { return; }
+    if place().is_none() { return; }
     // A hub diagram and an options diagram can coexist. Update this instance.
     let Some(controls) = (unsafe { g.rt.builtin_var_of("id", s) }) else { return };
     if g.num(controls, "device") < 0.0 { return; }
     let surface = g.get(controls, "surf");
     if !truthy(&g.call("surface_exists", &[surface])) { return; }
-    let binding = hint(g, PLACE_CARD);
+    let binding = hint(g, place());
     let stick = right_stick_binding(&binding);
     let saved = [g.call("draw_get_color", &[]), g.call("draw_get_alpha", &[]), g.call("draw_get_font", &[]), g.call("draw_get_halign", &[]), g.call("draw_get_valign", &[])];
     g.call("surface_set_target", &[surface]);

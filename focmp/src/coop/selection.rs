@@ -142,7 +142,10 @@ pub fn tick(c: &mut Coop) {
 }
 
 pub fn install_hooks(g: G) {
-    if let Some((_, addr)) = g.rt.scripts.iter().find(|(n, _)| *n == "gml_Script_draw@anon@3952@UI_card@Button") { DRAW_CARD.store(*addr, Ordering::Relaxed); }
+    match g.rt.script("gml_Script_draw@anon@3952@UI_card@Button") {
+        Some(address) => DRAW_CARD.store(address, Ordering::Relaxed),
+        None => crate::log("selection: card draw method not found"),
+    }
     for (name, hook, slot) in [
         ("gml_Object_objSelectPerk_Step_0", perk_step as *const (), &PERK_STEP),
         ("gml_Object_objSelectGuns_Step_0", gun_step as *const (), &GUN_STEP),

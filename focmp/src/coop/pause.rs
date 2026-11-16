@@ -56,7 +56,7 @@ pub unsafe fn controller_step(s: *mut c_void, o: *mut c_void, native: Event) {
             let dead = g.get(player, "dead");
             if !crate::engine::truthy(&dead)
                 || crate::engine::truthy(&g.get(player, "revive"))
-                || !super::controls::pressed(g, 7)
+                || !super::controls::pressed(g, super::controls::pause())
             {
                 return None;
             }

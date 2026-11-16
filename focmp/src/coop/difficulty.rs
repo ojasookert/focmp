@@ -54,8 +54,9 @@ pub fn install_hooks(g: G) {
         ("gml_Script_select_up@anon@6017@UI_card@Button", &SELECT_UP),
         ("gml_Script_deselect@anon@6616@UI_card@Button", &DESELECT),
     ] {
-        if let Some((_, address)) = g.rt.scripts.iter().find(|(n, _)| *n == name) {
-            slot.store(*address, Ordering::Relaxed);
+        match g.rt.script(name) {
+            Some(address) => slot.store(address, Ordering::Relaxed),
+            None => crate::log(&format!("difficulty: {name} not found")),
         }
     }
     for (name, hook, slot) in [

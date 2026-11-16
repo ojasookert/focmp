@@ -146,9 +146,9 @@ pub fn install_hooks(g: G) {
 }
 unsafe extern "C-unwind" fn check(s: *mut c_void, o: *mut c_void, ret: *mut V, argc: i32, args: *mut *mut V) -> *mut V {
     let f: ScriptFn = unsafe { std::mem::transmute(CHECK.load(Ordering::Relaxed)) };
-    // Native cleared-room continuation checks verb 8 (interact / E).
+    // Native cleared-room continuation checks the accept verb (interact / E).
     let intercept = ACTIVE.load(Ordering::Relaxed) && argc > 0 && !args.is_null()
-        && !unsafe { *args }.is_null() && unsafe { (**args).as_f64() } == Some(8.0);
+        && !unsafe { *args }.is_null() && super::controls::is_accept(unsafe { &**args });
     // A committed exit is a shared world action. The local pause menu (also
     // opened by controller disconnect) must not swallow its one-frame release.
     // Keep every other gameplay input blocked while the menu owns input.

@@ -87,12 +87,16 @@ pub unsafe fn hit(s: *mut c_void, n: i32, args: *mut *mut V) -> V {
     super::enemies::HITS.lock().unwrap().push(hit.clone());
     REPORTED.fetch_add(1, Ordering::Relaxed);
 
-    let blocked = shield_blocks(g, enemy, &hit);
-    if blocked && hit.scale == 1.0 && g.exists(a[7]) {
+    let mut blocked = shield_blocks(g, enemy, &hit);
+    if blocked {
         let excluded = g.get(enemy, "shielded_excluded_dmg_type_array");
         let excluded = (0..g.arr_len(excluded))
             .any(|i| g.arr_get(excluded, i).as_f64() == Some(hit.dtype as f64));
-        if !excluded
+        if excluded {
+            // Present what the host will do: a reduced but ordinary hit.
+            blocked = !excluded_types_pass_shields(g);
+        } else if hit.scale == 1.0
+            && g.exists(a[7])
             && method(
                 g,
                 a[7],
@@ -134,6 +138,14 @@ pub unsafe fn hit(s: *mut c_void, n: i32, args: *mut *mut V) -> V {
         }
     }
     boolean(false)
+}
+
+/// Before game v1.0.03 a shield swallowed its excluded damage types
+/// (electricity, plasma, black hole) without reflecting them. Since then they
+/// pass at reduced damage. objMessage first shipped in that build.
+fn excluded_types_pass_shields(g: G) -> bool {
+    static PASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PASS.get_or_init(|| g.rt.script("gml_Object_objMessage_Create_0").is_some())
 }
 
 /// Read-only prediction of the native directional shield test. The host still
