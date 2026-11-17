@@ -162,6 +162,7 @@ unsafe extern "C-unwind" fn hk_open_page(
 
 #[derive(Default)]
 pub struct MenuState {
+    pub start_error: Option<String>,
     last_page: String,
     instance: Option<u64>,
     escape_down: bool,
@@ -192,6 +193,7 @@ pub fn tick(g: G, c: &mut Coop) {
     let action = ACTION.lock().unwrap().take();
     if let Some(action) = action {
         match action.as_str() {
+            "page_coop_act_saved" => c.toggle_saved(g),
             "page_coop_act_ready" => c.toggle_ready(),
             "page_coop_act_color" => c.cycle_color(),
             "page_coop_act_copy" => {if let Some(code)=c.net.as_ref().and_then(|n|n.lobby_code()){g.call("clipboard_set_text",&[g.s(&code)]);}},
@@ -210,6 +212,7 @@ pub fn tick(g: G, c: &mut Coop) {
             "page_coop_act_start" | "page_coop_act_force_start" => {
                 let force = action == "page_coop_act_force_start";
                 let result = super::host_start_run(c, force);
+                c.menu.start_error = (super::rooms::RUN_SEED.load(Ordering::Relaxed) == 0).then_some(result.clone());
                 crate::log(&format!("coop lobby: {result}"));
             }
             _ => {
@@ -439,17 +442,22 @@ fn build(g: G, pages: V) -> Result<(), String> {
             vec![("Ready", Act::Open("page_coop_act_ready")), ("Leave lobby", Act::Back), ("Color", Act::Open("page_coop_act_color"))]
         };
         let color_index=actions.len()-1;
+        actions.push(("Start from save", Act::Open("page_coop_act_saved")));
         if crate::config::get().transport==crate::config::Transport::Steam {
             actions.push(("Copy lobby code",Act::Open("page_coop_act_copy")));
             actions.push(("Invite friends",Act::Open("page_coop_act_invite")));
         }
         mk_page(name, "CO-OP LOBBY", &actions)?;
         let arr = g.get(g.get(pages, name), "items");
-        if actions.len()>color_index+1 {
-            let copy=g.arr_get(arr,color_index+1);
+        let saved = g.arr_get(arr, color_index + 1);
+        position_button(g, saved, 414.0, 70.0, 174.0, 20.0);
+        g.set(saved, "focmp_save_checkbox", real(1.0));
+        g.set(saved, "focmp_secondary", real(1.0));
+        if actions.len()>color_index+2 {
+            let copy=g.arr_get(arr,color_index+2);
             position_button(g,copy,266.0,265.0,168.0,16.0);
             g.set(copy,"focmp_secondary",real(1.0));
-            let invite=g.arr_get(arr,color_index+2);
+            let invite=g.arr_get(arr,color_index+3);
             position_button(g,invite,184.0,286.0,118.0,28.0);
         }
         let color = g.arr_get(arr, color_index);
@@ -627,7 +635,7 @@ fn refresh_lobby(g: G, c: &mut Coop, pages: V, active: &str) {
         action(g,g.arr_get(items,g.arr_len(items)-1),steam,"page_coop_act_invite");
     }
     if active == CONFIRM_PAGE {
-        action(g, g.arr_get(items, 1), connected && host, "page_coop_act_force_start");
+        action(g, g.arr_get(items, 1), connected && host && c.save_start_error().is_none(), "page_coop_act_force_start");
         return;
     }
     let ready = c.net.as_ref().is_some_and(|n| c.ready.get(n.my_id as usize).copied().unwrap_or(false));
@@ -635,15 +643,18 @@ fn refresh_lobby(g: G, c: &mut Coop, pages: V, active: &str) {
     let text = if ready { "Cancel ready" } else { "Ready" };
     if g.str_of(&g.get(ready_item, "text")) != text { g.set(ready_item, "text", g.s(text)); }
     action(g, ready_item, connected, "page_coop_act_ready");
-    let color_item = g.arr_get(items, if active=="page_coop_host" {4}else{2});
+    let color_index = if active == "page_coop_host" {4} else {2};
+    let saved_item = g.arr_get(items, color_index + 1);
+    action(g, saved_item, connected && host, "page_coop_act_saved");
+    let color_item = g.arr_get(items, color_index);
     action(g, color_item, connected, "page_coop_act_color");
     let color = c.net.as_ref().and_then(|n| c.colors.get(n.my_id as usize)).copied().unwrap_or(0);
     let color_text = format!("Color: {}  >", super::colors::name(color));
     if g.str_of(&g.get(color_item, "text")) != color_text { g.set(color_item, "text", g.s(&color_text)); }
     g.set(color_item, "focmp_color", real(super::colors::value(color)));
     if active == "page_coop_host" {
-        action(g, g.arr_get(items, 1), connected && host && c.everyone_ready(), "page_coop_act_start");
-        action(g, g.arr_get(items, 2), connected && host && !c.everyone_ready(), CONFIRM_PAGE);
+        action(g, g.arr_get(items, 1), connected && host && c.everyone_ready() && c.save_start_error().is_none(), "page_coop_act_start");
+        action(g, g.arr_get(items, 2), connected && host && !c.everyone_ready() && c.save_start_error().is_none(), CONFIRM_PAGE);
     }
 }
 
@@ -707,7 +718,7 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         text(52.0, 54.0, if waiting == 0 { "START RUN?" } else { "START WITHOUT EVERYONE READY?" }, accent);
         let readiness = if waiting == 0 { "Everyone is ready.".into() } else { format!("{waiting} player{} not ready.", if waiting == 1 { " is" } else { "s are" }) };
         text(72.0, 113.0, &readiness, white);
-        text(72.0, 150.0, "Everyone will move to difficulty selection.", white);
+        text(72.0, 150.0, if c.saved_run { "Everyone loads their own saved loadout." } else { "Everyone will move to difficulty selection." }, white);
         text(72.0, 178.0, "Players cannot join once the run starts.", muted);
         if !connected { text(72.0, 210.0, "The lobby is no longer connected.", accent); }
     } else {
@@ -754,12 +765,19 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
                         }
                         color_labels.push(ColorLabel { x: 401.0, y, text: super::latency::text(ping), color: if bad && blink { pink } else { muted }, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 1.0 });
                     }
+                    if c.saved_run {
+                        let label = c.save_checkpoints[*id as usize].map_or_else(|| "Save unavailable".into(), |p| p.label());
+                        color_labels.push(ColorLabel { x: 68.0, y: y + 13.0, text: label, color: muted, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 0.75 });
+                    }
                     text(470.0, y, if c.ready[*id as usize] { "Ready" } else { "Not ready" }, if c.ready[*id as usize] { green } else { muted });
                 }
                 None => { text(68.0, y, "Open slot", muted); text(470.0, y, "Waiting", muted); }
             }
         }
-        let message = if !connected { "Leave this lobby to host or join another.".into() }
+        let message = if let Some(error) = &c.menu.start_error { error.clone() }
+            else if let Some(error) = c.save_start_error() { error }
+            else if c.saved_run { "Matching saves. Each player keeps their own loadout.".into() }
+            else if !connected { "Leave this lobby to host or join another.".into() }
             else if host && waiting == 0 { "Everyone is ready. Start the run when you're ready.".into() }
             else if host { format!("Waiting for {waiting} player{} to ready up.", if waiting == 1 { "" } else { "s" }) }
             else if c.net.as_ref().is_some_and(|n| c.ready.get(n.my_id as usize).copied().unwrap_or(false)) { "You're ready. Waiting for the host to start.".into() }
@@ -775,6 +793,19 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         let secondary = truthy(&g.get(item, "focmp_secondary"));
         let selected = focus == i as i32 && enabled;
         let (x1, y1, x2, y2) = (g.num(item, "x1"), g.num(item, "y1"), g.num(item, "x2"), g.num(item, "y2"));
+        if truthy(&g.get(item, "focmp_save_checkbox")) {
+            if selected { rect(x1 - 3.0, y1, x2, y2, rgb(28, 42, 43), false); }
+            let color = if enabled { white } else { muted };
+            let cy = (y1 + y2) / 2.0;
+            rect(x1, cy - 7.0, x1 + 14.0, cy + 7.0, if enabled { accent } else { muted }, true);
+            if c.saved_run {
+                g.call("draw_set_color", &[real(if enabled { accent } else { muted })]);
+                g.call("draw_line_width", &[real(x1 + 3.0), real(cy), real(x1 + 6.0), real(cy + 3.0), real(2.0)]);
+                g.call("draw_line_width", &[real(x1 + 6.0), real(cy + 3.0), real(x1 + 12.0), real(cy - 4.0), real(2.0)]);
+            }
+            text(x1 + 22.0, cy, "Start from save", color);
+            continue;
+        }
         if !secondary {
             rect(x1, y1, x2, y2, if selected { accent } else { rgb(17, 26, 29) }, false);
             rect(x1, y1, x2, y2, if enabled { accent } else { rgb(60, 70, 72) }, true);

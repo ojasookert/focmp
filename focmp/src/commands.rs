@@ -48,6 +48,7 @@ navigation:
 co-op:
   coop [status]                session status and players
   coop host [port] | coop join [addr[:port]] | coop leave
+  coop saved                   toggle saved-game start (host lobby only)
   coop ai                      enemy → target player assignments and aggro
   trace damage                 toggle logging of every enemy set_damage call
   quit                         close the connection";

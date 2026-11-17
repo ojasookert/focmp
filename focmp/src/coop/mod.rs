@@ -72,6 +72,10 @@ pub struct Coop {
     pub enemies: enemies::Enemies,
     pub menu: menu::MenuState,
     pub ready: [bool; crate::net::MAX_PLAYERS],
+    pub saved_run: bool,
+    lobby_revision: u32,
+    saved_local: Option<crate::saves::Prepared>,
+    pub save_checkpoints: [Option<crate::saves::Checkpoint>; crate::net::MAX_PLAYERS],
     pub colors: [u8; crate::net::MAX_PLAYERS],
     pub difficulty: difficulty::Difficulty,
     pub cursors: cursors::Cursors,
@@ -101,6 +105,10 @@ pub static COOP: LazyLock<Mutex<Coop>> = LazyLock::new(|| {
         enemies: enemies::Enemies::default(),
         menu: menu::MenuState::default(),
         ready: [false; crate::net::MAX_PLAYERS],
+        saved_run: false,
+        lobby_revision: 0,
+        saved_local: None,
+        save_checkpoints: [None; crate::net::MAX_PLAYERS],
         colors: [0, 1, 2],
         difficulty: difficulty::Difficulty::default(),
         cursors: cursors::Cursors::default(),
@@ -164,6 +172,11 @@ impl Coop {
         self.enemies.reset();
         self.my_layout = None;
         self.ready = [false; crate::net::MAX_PLAYERS];
+        self.saved_run = false;
+        self.lobby_revision = 0;
+        self.saved_local = None;
+        self.save_checkpoints = [None; crate::net::MAX_PLAYERS];
+        self.menu.start_error = None;
         self.colors = [0, 1, 2];
         self.difficulty = difficulty::Difficulty::default();
         self.cursors = cursors::Cursors::default();
@@ -215,6 +228,7 @@ impl Coop {
                     self.latency.reset_peer(p.id);
                     crate::log(&format!("coop: {} joined (peer {})", p.name, p.id));
                     self.ready[p.id as usize] = false;
+                    self.save_checkpoints[p.id as usize] = None;
                     self.colors[p.id as usize] = p.id;
                     self.lobby_sent = None;
                     self.remotes.insert(p.id, Remote { room:String::new(),busy:false,name: p.name, state: None, seen: Instant::now(), layout: None });
@@ -229,6 +243,7 @@ impl Coop {
                         self.ending.member_left(id);
                     }
                     self.ready[id as usize] = false;
+                    self.save_checkpoints[id as usize] = None;
                     self.lobby_sent = None;
                     let name = self.remotes.remove(&id).map(|r| r.name).unwrap_or_default();
                     crate::log(&format!("coop: {name} (peer {id}) left"));
@@ -289,17 +304,28 @@ impl Coop {
                             }
                         }
                         Msg::Pong(_) => {}
-                        Msg::StartRun { seed, rules } => {
+                        Msg::StartRun { seed, rules, save } => {
                             if from == 0 {
                                 if rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
+                                    if let Some(world) = &save {
+                                        if self.saved_local.as_ref().is_none_or(|s| s.world.checkpoint != world.checkpoint) {
+                                            self.leave(g);
+                                            self.status = "Cannot start: own saved progression does not match host".into();
+                                            continue;
+                                        }
+                                    } else if let Err(error) = crate::saves::prepare_fresh(g) {
+                                        self.leave(g);
+                                        self.status = format!("Cannot prepare co-op save: {error}");
+                                        continue;
+                                    }
                                     *crate::config::RUN_RULES.lock().unwrap() = rules;
-                                    start_run_local(seed);
+                                    start_run_local(seed, self.saved_local.as_ref().zip(save.as_ref()));
                                 }
                             }
                         }
                         Msg::Layout { level, sub, hash } => r.layout = Some((level, sub, hash)),
-                        Msg::SetReady(ready) => {
-                            if role == Role::Host && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
+                        Msg::SetReady { ready, revision } => {
+                            if role == Role::Host && revision == self.lobby_revision && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
                                 self.ready[from as usize] = ready;
                                 self.lobby_sent = None;
                             }
@@ -310,8 +336,19 @@ impl Coop {
                                 self.lobby_sent = None;
                             }
                         }
-                        Msg::Lobby { ready, colors, ping_ms, .. } => {
-                            if from == 0 { self.ready = ready; self.colors = colors; self.latency.ms = ping_ms; }
+                        Msg::SaveCheck { revision, checkpoint } => {
+                            if role == Role::Host && revision == self.lobby_revision && self.saved_run && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
+                                self.save_checkpoints[from as usize] = checkpoint;
+                                self.lobby_sent = None;
+                            }
+                        }
+                        Msg::Lobby { ready, colors, ping_ms, saved, revision, saves, .. } => {
+                            if from == 0 && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
+                                let changed = self.saved_run != saved || self.lobby_revision != revision;
+                                self.ready = ready; self.colors = colors; self.latency.ms = ping_ms;
+                                self.saved_run = saved; self.lobby_revision = revision; self.save_checkpoints = saves;
+                                if changed { self.prepare_saved(g); }
+                            }
                         }
                         Msg::MenuCursor { run, menu, x, y, visible } => cursors::receive(self, from, run, menu, x, y, visible),
                         msg @ (Msg::SelectionUpdate { .. } | Msg::SelectionState { .. } | Msg::SelectionAck { .. } | Msg::SelectionCommit { .. }) => selection::receive(self, from, msg),
@@ -349,8 +386,47 @@ impl Coop {
             self.ready[n.my_id as usize] = value;
             self.lobby_sent = None;
         } else {
-            n.broadcast(Msg::SetReady(value));
+            n.broadcast(Msg::SetReady { ready: value, revision: self.lobby_revision });
         }
+    }
+
+    pub fn toggle_saved(&mut self, g: G) {
+        if rooms::RUN_SEED.load(Ordering::Relaxed) != 0 || !self.net.as_ref().is_some_and(|n| n.role == Role::Host && n.connected()) { return; }
+        self.saved_run = !self.saved_run;
+        self.lobby_revision = self.lobby_revision.wrapping_add(1);
+        self.ready = [false; crate::net::MAX_PLAYERS];
+        self.save_checkpoints = [None; crate::net::MAX_PLAYERS];
+        self.lobby_sent = None;
+        self.prepare_saved(g);
+    }
+
+    fn prepare_saved(&mut self, g: G) {
+        self.saved_local = None;
+        self.menu.start_error = None;
+        if !self.saved_run { return; }
+        match crate::saves::prepare_local(g) {
+            Ok(save) => self.saved_local = Some(save),
+            Err(error) => { crate::log(&format!("saved run: {error}")); self.menu.start_error = Some(error); }
+        }
+        if let Some(n) = &self.net {
+            let checkpoint = self.saved_local.as_ref().map(|s| s.world.checkpoint);
+            self.save_checkpoints[n.my_id as usize] = checkpoint;
+            if n.role == Role::Client { n.broadcast(Msg::SaveCheck { revision: self.lobby_revision, checkpoint }); }
+        }
+    }
+
+    pub fn save_start_error(&self) -> Option<String> {
+        if !self.saved_run { return None; }
+        let n = self.net.as_ref()?;
+        let Some(host) = self.save_checkpoints[0] else { return Some("Host needs a valid saved run".into()); };
+        for peer in &n.peers {
+            match self.save_checkpoints[peer.id as usize] {
+                None => return Some(format!("Player {} needs a valid saved run", peer.id + 1)),
+                Some(p) if p != host => return Some("Saves must match level, sublevel and difficulty".into()),
+                _ => {}
+            }
+        }
+        None
     }
 
     pub fn cycle_color(&mut self) {
@@ -371,7 +447,7 @@ impl Coop {
     fn send_lobby(&mut self) {
         let Some(n) = &self.net else { return };
         if n.role == Role::Host && self.lobby_sent.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
-            n.broadcast(Msg::Lobby { ready: self.ready, colors: self.colors, ping_ms: self.latency.ms, running: rooms::RUN_SEED.load(Ordering::Relaxed) != 0 });
+            n.broadcast(Msg::Lobby { saved: self.saved_run, revision: self.lobby_revision, saves: self.save_checkpoints, ready: self.ready, colors: self.colors, ping_ms: self.latency.ms, running: rooms::RUN_SEED.load(Ordering::Relaxed) != 0 });
             self.lobby_sent = Some(Instant::now());
         }
     }
@@ -447,8 +523,8 @@ impl Coop {
 }
 
 /// Begin a co-op run locally with `seed`: install generation hooks and send
-/// the player to the game's own run setup (PLAY page → run).
-pub fn start_run_local(seed: u64) {
+/// the player through native run setup or their own prepared save.
+pub fn start_run_local(seed: u64, saved: Option<(&crate::saves::Prepared, &crate::saves::World)>) {
     props::reset();
     boss_contact::reset();
     rooms::RUN_SEED.store(seed, Ordering::Relaxed);
@@ -488,22 +564,18 @@ pub fn start_run_local(seed: u64) {
         }
         // The native PLAY/run item uses start_game with val = this room.
         // Starting here runs the same RoomStart initialization on every peer.
-        g.call("room_goto", &[g.asset("Room_select_difficulty")]);
+        if let Some((local, world)) = saved { crate::saves::load_run(g, local, world); }
+        else { g.call("room_goto", &[g.asset("Room_select_difficulty")]); }
     }
 }
 
 /// Host: pick a run seed, tell everyone, start locally.
 pub fn host_start_run(c: &mut Coop, force: bool) -> String {
     if rooms::RUN_SEED.load(Ordering::Relaxed) != 0 { return "run already started".into(); }
+    if let Some(error) = c.save_start_error() { return error; }
     let Some(n) = &mut c.net else { return "not in a session".into() };
     if n.role != Role::Host {
         return "only the host can start the run".into();
-    }
-    // Admission and the roster snapshot are locked together, so a peer cannot
-    // join between the ready check and StartRun and miss the message.
-    match n.begin_run(force, &c.ready) {
-        Ok(peers) => n.peers = peers,
-        Err(e) => return e,
     }
     let seed = {
         use std::hash::{BuildHasher, Hasher};
@@ -511,12 +583,27 @@ pub fn host_start_run(c: &mut Coop, force: bool) -> String {
         h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
         h.finish() | 1
     };
+    let Some(g) = G::new() else { return "game is not ready".into() };
+    if g.room_name() != "Room_main_menu" { return "start from the main menu".into(); }
+    let save = if c.saved_run {
+        let Some(local) = &c.saved_local else { return "Your saved run is unavailable".into() };
+        Some(local.world.clone())
+    } else {
+        if let Err(error) = crate::saves::prepare_fresh(g) { return error; }
+        None
+    };
+    // Admission and the roster snapshot are locked together, so a peer cannot
+    // join between the ready check and StartRun and miss the message.
+    match n.begin_run(force, &c.ready, c.saved_run.then_some(&c.save_checkpoints)) {
+        Ok(peers) => n.peers = peers,
+        Err(e) => { crate::saves::clear_run_file(); return e; },
+    }
     let mut rules = crate::config::get().rules;
     rules.players = n.peers.len() as u8;
     *crate::config::RUN_RULES.lock().unwrap() = rules;
     crate::log(&format!("run settings: {rules:?}"));
-    n.broadcast(Msg::StartRun { seed, rules });
-    start_run_local(seed);
+    n.broadcast(Msg::StartRun { seed, rules, save: save.clone() });
+    start_run_local(seed, c.saved_local.as_ref().zip(save.as_ref()));
     format!("run started (seed {seed:016x})")
 }
 
@@ -751,12 +838,16 @@ pub fn console(args: &[String]) -> String {
         },
         ["ready"] => { c.toggle_ready(); status(&c) }
         ["start"] => host_start_run(&mut c, true),
-        _ => "usage: coop [status] | coop host [port] | coop join [addr[:port]] | coop leave | coop start | coop ai".into(),
+        ["saved"] => { c.toggle_saved(g); format!("Start from save: {}", c.saved_run) },
+        _ => "usage: coop [status] | coop host [port] | coop join [addr[:port]] | coop leave | coop saved | coop start | coop ai".into(),
     }
 }
 
 fn status(c: &Coop) -> String {
     let mut s = format!("status: {}\n", c.status);
+    s += &format!("start from save: {}\n", c.saved_run);
+    if let Some(error) = c.save_start_error() { s += &format!("saved start blocked: {error}\n"); }
+    if let Some(error) = &c.menu.start_error { s += &format!("save error: {error}\n"); }
     for (id, name, me) in c.roster() {
         let st = if me {
             "(you)".to_string()
@@ -766,6 +857,9 @@ fn status(c: &Coop) -> String {
                 None => "no player in a room".into(),
             }
         };
+        if c.saved_run {
+            s += &format!("  P{} {}\n", id + 1, c.save_checkpoints[id as usize].map_or_else(|| "save unavailable".into(), |p| p.label()));
+        }
         let ping = if id == 0 { String::new() } else { format!(" ping to host (ms): {}", latency::text(c.latency.ms[id as usize])) };
         s += &format!("  P{} {:<20} {} [{}]{}\n", id + 1, name, st, if c.ready[id as usize] { "ready" } else { "not ready" }, ping);
     }

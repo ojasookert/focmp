@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 35;
+pub const PROTOCOL: u32 = 36;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -108,10 +108,11 @@ pub enum Msg {
     Ping(u64),
     Pong(u64),
     /// Host started a co-op run with this run seed (rooms.rs).
-    StartRun { seed: u64, rules: crate::config::RunRules },
-    SetReady(bool),
+    StartRun { seed: u64, rules: crate::config::RunRules, save: Option<crate::saves::World> },
+    SetReady { ready: bool, revision: u32 },
+    SaveCheck { revision: u32, checkpoint: Option<crate::saves::Checkpoint> },
     SetColor(u8),
-    Lobby { ready: [bool; MAX_PLAYERS], colors: [u8; MAX_PLAYERS], ping_ms: [Option<u16>; MAX_PLAYERS], running: bool },
+    Lobby { saved: bool, revision: u32, saves: [Option<crate::saves::Checkpoint>; MAX_PLAYERS], ready: [bool; MAX_PLAYERS], colors: [u8; MAX_PLAYERS], ping_ms: [Option<u16>; MAX_PLAYERS], running: bool },
     DifficultyLoaded { run: u64, unlocked: u8, initial: u8 },
     DifficultyEdit { run: u64, revision: u32, index: u8, enabled: bool },
     DifficultyAgree { run: u64, revision: u32, agree: bool },
@@ -167,8 +168,10 @@ impl Msg {
             Self::PurchaseResult{run,peer,id,..}=>from==0&&*run!=0&&*id!=0&&(*peer as usize)<MAX_PLAYERS,
             Self::PurchaseDone{run,id,..}=>*run!=0&&*id!=0,
             Self::TeamGameOver{run} => from==0&&*run!=0,
-            Self::StartRun { seed, rules } => from == 0 && *seed != 0 && rules.valid(),
-            Self::Lobby { colors, .. } => from == 0 && colors.iter().all(|c| *c < 8),
+            Self::StartRun { seed, rules, save } => from == 0 && *seed != 0 && rules.valid()
+                && save.as_ref().is_none_or(|s| s.sane()),
+            Self::Lobby { colors, saves, .. } => from == 0 && colors.iter().all(|c| *c < 8) && saves.iter().flatten().all(|s| s.sane()),
+            Self::SaveCheck { checkpoint, .. } => checkpoint.is_none_or(|s| s.sane()),
             Self::SetColor(color) => *color < 8,
             Self::DifficultyLoaded { run, unlocked, initial } => *run != 0 && *unlocked < 128 && *initial < 128,
             Self::DifficultyEdit { run, index, .. } => *run != 0 && *index < 7,
@@ -672,11 +675,17 @@ impl Net {
 
     /// Close admission atomically with the roster snapshot. A concurrent Hello
     /// is either included here or refused; it cannot miss StartRun.
-    pub fn begin_run(&self, force: bool, ready: &[bool; MAX_PLAYERS]) -> Result<Vec<PeerInfo>, String> {
+    pub fn begin_run(&self, force: bool, ready: &[bool; MAX_PLAYERS], saves: Option<&[Option<crate::saves::Checkpoint>; MAX_PLAYERS]>) -> Result<Vec<PeerInfo>, String> {
         let mut a = self.admission.lock().unwrap();
         if a.running { return Err("run already started".into()); }
         if !force && a.peers.iter().any(|p| !ready[p.id as usize]) {
             return Err("players not ready".into());
+        }
+        if let Some(saves) = saves {
+            let Some(host) = saves[0] else { return Err("Host needs a valid saved run".into()); };
+            if a.peers.iter().any(|p| saves[p.id as usize] != Some(host)) {
+                return Err("Every player needs matching saved progression".into());
+            }
         }
         a.running = true;
         let peers=a.peers.clone();drop(a);

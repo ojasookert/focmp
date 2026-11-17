@@ -29,6 +29,10 @@ If you'd rather install by hand, copy the DLLs and `focmp.ini` from the release 
 
 Open **COOP**, choose **Host** and invite your friends. Everyone needs their own copy of the game, matching game and FOCMP versions, and has to join before the run starts.
 
+To resume saved characters, the host turns on **Start from save** in the lobby. Each player loads their own guns, cards, perks and health. The lobby shows saved levels and requires matching level, sublevel, completed-stage count and difficulty before starting, including **Start anyway**. Changing the toggle clears ready votes. A missing or finished save blocks the start; turn the toggle off to start a new run.
+
+Saved-game starts use a copy of each player's modded save (or their single-player save if no modded save exists). All co-op autosaves go to a new `coop_runs/<session>/savefile.json` under the modded save directory; existing saves are never overwritten. The host supplies shared stage targets and boss conditions, and the normal co-op shared economy still applies.
+
 Mod settings live in `focmp.ini` in the game folder. Modded saves are kept apart from your normal ones.
 
 If something goes wrong, [open an issue](https://github.com/ojasookert/focmp/issues) with your FOCMP version, operating system, whether you were hosting or joining, and what happened. Include steps to reproduce it, any error messages, and relevant log files or screenshots if available.
