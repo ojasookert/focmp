@@ -23,9 +23,9 @@ print('Archive integrity and every packaged file verified.')
 # Game versions this release supports: Flashes_of_Chaos.exe (GameMaker runner) and data.win (game code and assets)
 # both identify a version; steam_build is shown to players. Add an entry when the mod is updated for a game update.
 GAME_VERSIONS=[
-    {'name':'v1.0.03','steam_build':26680968,
-     'exe_sha256':'4646a3d5f893fa690679d593a01b544a3ff9f31da8d807af3a10e233f27ebe3a',
-     'data_sha256':'ad71c921378b90bd704bba776806f6524d3e7e94ac47331087eb4191e87bc966'},
+    {'name':'v1.0.03 hotfix','steam_build':26739179,
+     'exe_sha256':'424f23e2b0a6536da8b7f8c237b6bb840d007dcd35013e5411e5a01530736901',
+     'data_sha256':'5908e5a6017e4ad4fd8bea5d669249762976f4ad728fd02a5bae3cb8b989372f'},
 ]
 
 manifest={

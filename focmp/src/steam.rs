@@ -530,6 +530,18 @@ impl Steam {
         );
         self.api.data(self.lobby, "running", "1");
     }
+    /// The session is back in its lobby after a run: accept players again.
+    pub fn end_run(&mut self) {
+        call!(
+            self.api,
+            "SteamAPI_ISteamMatchmaking_SetLobbyJoinable",
+            unsafe extern "C" fn(usize, u64, bool) -> bool,
+            self.api.mm,
+            self.lobby,
+            true
+        );
+        self.api.data(self.lobby, "running", "0");
+    }
     pub fn disconnect(&mut self, peer: PeerId) {
         if let Some(id) = self
             .peers

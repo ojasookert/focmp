@@ -111,6 +111,7 @@ unsafe extern "C-unwind" fn menu_step(s: *mut c_void, o: *mut c_void) {
             }
             tick(g, &mut c);
             invites(g, &mut c);
+            reopen_lobby(g, &mut c);
         }
     }
     let f: unsafe extern "C-unwind" fn(*mut c_void, *mut c_void) =
@@ -163,6 +164,11 @@ unsafe extern "C-unwind" fn hk_open_page(
 #[derive(Default)]
 pub struct MenuState {
     pub start_error: Option<String>,
+    /// The lobby page this session was entered through, and a request to
+    /// reopen it once the main menu exists again (after a team wipe).
+    lobby_page: String,
+    pending_lobby: Option<String>,
+    lobby_steps: u8,
     last_page: String,
     instance: Option<u64>,
     escape_down: bool,
@@ -173,12 +179,69 @@ pub struct MenuState {
 
 pub(super) fn preview_friends(c: &mut Coop, ids: &[&str]) -> String { c.menu.friends.preview(ids) }
 
+impl MenuState {
+    /// Ask for the session's lobby page to be shown again. Sessions started
+    /// from the console never opened one; any lobby page draws the same panel.
+    pub(super) fn resume_lobby(&mut self, host: bool) {
+        let page = if host { "page_coop_host" } else if self.lobby_page.is_empty() || self.lobby_page == "page_coop_host" { "page_coop_lobby_invite" } else { &self.lobby_page };
+        self.pending_lobby = Some(page.to_owned());
+        self.lobby_steps = 0;
+    }
+}
+
+#[derive(Clone, Copy)]
 enum Act {
     Open(&'static str),
     Back,
 }
 
 const LOBBY_PAGES: [&str; 4] = ["page_coop_host", "page_coop_lobby_local", "page_coop_lobby_clip", "page_coop_lobby_invite"];
+
+// Lobby layout (640x360 GUI). The subtitle row holds only short text, so
+// nothing can run under the Start from save checkbox; the Steam lobby code
+// sits in gray beside the title instead.
+const MARGIN_X: f64 = 52.0;
+const RIGHT_X: f64 = 588.0;
+// "Start from save [x]": the box sits on the right margin, label to its left.
+const SAVE_BOX_X: f64 = RIGHT_X - 136.0;
+// Colour picker: the left arrow's tip sits on the margin; its click box
+// reaches a little past it. The right arrow clears the widest palette name.
+const COLOR_ARROW_W: f64 = 18.0;
+const COLOR_PREV_X: f64 = MARGIN_X - 6.0;
+const COLOR_NAME_X: f64 = MARGIN_X + 26.0;
+const COLOR_NEXT_X: f64 = COLOR_NAME_X + 46.0;
+
+/// Layout QA only: the local TCP rig cannot create a Steam lobby, so
+/// FOCMP_PREVIEW_LOBBY_CODE shows the Steam-only lobby controls with this
+/// code. It never reaches the network.
+fn preview_code() -> Option<&'static str> {
+    static CODE: LazyLock<Option<String>> = LazyLock::new(|| {
+        std::env::var("FOCMP_PREVIEW_LOBBY_CODE").ok().filter(|code| !code.is_empty() && code.len() <= 20 && code.bytes().all(|b| b.is_ascii_digit()))
+    });
+    CODE.as_deref()
+}
+fn steam_controls() -> bool {
+    crate::config::get().transport == crate::config::Transport::Steam || preview_code().is_some()
+}
+fn lobby_code(c: &Coop) -> Option<String> {
+    let net = c.net.as_ref()?;
+    net.lobby_code().or_else(|| preview_code().filter(|_| net.connected()).map(str::to_owned))
+}
+/// The lobby item tagged with `role` in build(); positions are not indices.
+fn lobby_item(g: G, items: V, role: &str) -> Option<V> {
+    (0..g.arr_len(items)).map(|i| g.arr_get(items, i)).find(|item| g.get(*item, "focmp_role").as_str().as_deref() == Some(role))
+}
+/// Shorten `text` until it fits `width` in the current font.
+fn fit(g: G, text: &str, width: f64) -> String {
+    let wide = |s: &str| g.call("string_width", &[g.s(s)]).as_f64().unwrap_or(0.0) > width;
+    if !wide(text) { return text.to_owned(); }
+    let mut cut: String = text.chars().collect();
+    while cut.pop().is_some() {
+        let candidate = format!("{}...", cut.trim_end());
+        if !wide(&candidate) { return candidate; }
+    }
+    String::new()
+}
 
 
 pub fn tick(g: G, c: &mut Coop) {
@@ -195,8 +258,9 @@ pub fn tick(g: G, c: &mut Coop) {
         match action.as_str() {
             "page_coop_act_saved" => c.toggle_saved(g),
             "page_coop_act_ready" => c.toggle_ready(),
-            "page_coop_act_color" => c.cycle_color(),
-            "page_coop_act_copy" => {if let Some(code)=c.net.as_ref().and_then(|n|n.lobby_code()){g.call("clipboard_set_text",&[g.s(&code)]);}},
+            "page_coop_act_color_prev" => c.cycle_color(false),
+            "page_coop_act_color_next" => c.cycle_color(true),
+            "page_coop_act_copy" => {if let Some(code)=lobby_code(c){g.call("clipboard_set_text",&[g.s(&code)]);}},
             "page_coop_act_invite" => {
                 let result = c.net.as_ref().and_then(|n| n.lobby_code()).and_then(|s| s.parse().ok())
                     .ok_or_else(|| "The Steam lobby is not ready yet".to_string())
@@ -297,7 +361,33 @@ fn invites(g: G, c: &mut Coop) {
     let old = g.call("array_create", &[real(1.0),g.s("page_coop")]);
     g.set(page,"old",old);
     activate(g, "page_coop_lobby_invite");
+    c.menu.lobby_page = "page_coop_lobby_invite".into();
     c.menu.last_page = "page_coop_lobby_invite".into();
+}
+
+/// Back from a run with the session intact: show its lobby again. Entering
+/// the page the ordinary way would host or join a second time, so mark it as
+/// already entered, exactly as an accepted invite does.
+///
+/// A freshly created main menu puts its own top page back during its first
+/// steps, so keep asking until the lobby page has stayed up for a few of them.
+fn reopen_lobby(g: G, c: &mut Coop) {
+    let Some(name) = c.menu.pending_lobby.clone() else { return };
+    if c.net.is_none() { c.menu.pending_lobby = None; return; }
+    if g.room_name() != "Room_main_menu" { return; }
+    let Some(menu) = g.first("objMenu") else { return };
+    if !struct_has(g, g.get(menu, "pages"), &name) { return; }
+    let page = g.global("page");
+    if g.str_of(&g.get(page, "active")) == name {
+        c.menu.lobby_steps += 1;
+        if c.menu.lobby_steps >= 10 { c.menu.pending_lobby = None; }
+    } else {
+        c.menu.lobby_steps = 0;
+        g.set(page, "old", g.call("array_create", &[real(1.0), g.s("page_coop")]));
+        activate(g, &name);
+    }
+    c.menu.lobby_page = name.clone();
+    c.menu.last_page = name;
 }
 
 fn activate(g: G, name: &str) {
@@ -322,6 +412,7 @@ fn activate(g: G, name: &str) {
 
 fn on_enter(g: G, c: &mut Coop, page: &str) {
     let was_lobby = LOBBY_PAGES.contains(&c.menu.last_page.as_str()) || c.menu.last_page == CONFIRM_PAGE;
+    if LOBBY_PAGES.contains(&page) { c.menu.lobby_page = page.to_owned(); }
     match page {
         "page_coop_host" => {
             // Returning from confirmation must preserve the current session.
@@ -339,7 +430,9 @@ fn on_enter(g: G, c: &mut Coop, page: &str) {
         }
         // Back out of a lobby to the COOP/JOIN pages ends the session.
         // Leaving the menu entirely (starting a run) keeps it.
-        "page_coop" | "page_coop_join" | "page_top_menu" if was_lobby && super::rooms::RUN_SEED.load(Ordering::Relaxed) == 0 => c.leave(g),
+        // (Not while a lobby is being reopened after a run: the new menu's own
+        // top page showing up for a step is not the player backing out.)
+        "page_coop" | "page_coop_join" | "page_top_menu" if was_lobby && c.menu.pending_lobby.is_none() && super::rooms::RUN_SEED.load(Ordering::Relaxed) == 0 => c.leave(g),
         _ => {}
     }
 }
@@ -430,49 +523,31 @@ fn build(g: G, pages: V) -> Result<(), String> {
     }
 
     for name in LOBBY_PAGES {
-        let mut actions = if name == "page_coop_host" {
-            vec![
-                ("Ready", Act::Open("page_coop_act_ready")),
-                ("Start run", Act::Open("page_coop_act_start")),
-                ("Start anyway...", Act::Open(CONFIRM_PAGE)),
-                ("Leave lobby", Act::Back),
-                ("Color", Act::Open("page_coop_act_color")),
-            ]
-        } else {
-            vec![("Ready", Act::Open("page_coop_act_ready")), ("Leave lobby", Act::Back), ("Color", Act::Open("page_coop_act_color"))]
-        };
-        let color_index=actions.len()-1;
-        actions.push(("Start from save", Act::Open("page_coop_act_saved")));
-        if crate::config::get().transport==crate::config::Transport::Steam {
-            actions.push(("Copy lobby code",Act::Open("page_coop_act_copy")));
-            actions.push(("Invite friends",Act::Open("page_coop_act_invite")));
+        let hosting = name == "page_coop_host";
+        // (role, label, action, x, y, width, height, secondary)
+        let mut controls: Vec<(&str, &str, Act, f64, f64, f64, f64, bool)> = vec![
+            ("ready", "Ready", Act::Open("page_coop_act_ready"), if hosting { 310.0 } else { 454.0 }, 286.0, if hosting { 128.0 } else { 134.0 }, 28.0, false),
+        ];
+        if hosting {
+            controls.push(("start", "Start run", Act::Open("page_coop_act_start"), 454.0, 286.0, 134.0, 28.0, false));
+            controls.push(("force", "Start anyway...", Act::Open(CONFIRM_PAGE), 446.0, 265.0, 142.0, 16.0, true));
         }
+        controls.push(("leave", "Leave lobby", Act::Back, 52.0, 286.0, 124.0, 28.0, false));
+        controls.push(("color_prev", "<", Act::Open("page_coop_act_color_prev"), COLOR_PREV_X, 265.0, COLOR_ARROW_W, 16.0, true));
+        controls.push(("color_next", ">", Act::Open("page_coop_act_color_next"), COLOR_NEXT_X, 265.0, COLOR_ARROW_W, 16.0, true));
+        controls.push(("saved", "Start from save", Act::Open("page_coop_act_saved"), SAVE_BOX_X, 70.0, RIGHT_X - SAVE_BOX_X, 20.0, true));
+        if steam_controls() {
+            controls.push(("copy", "Copy lobby code", Act::Open("page_coop_act_copy"), 266.0, 265.0, 168.0, 16.0, true));
+            controls.push(("invite", "Invite friends", Act::Open("page_coop_act_invite"), 184.0, 286.0, 118.0, 28.0, false));
+        }
+        let actions: Vec<(&str, Act)> = controls.iter().map(|c| (c.1, c.2)).collect();
         mk_page(name, "CO-OP LOBBY", &actions)?;
         let arr = g.get(g.get(pages, name), "items");
-        let saved = g.arr_get(arr, color_index + 1);
-        position_button(g, saved, 414.0, 70.0, 174.0, 20.0);
-        g.set(saved, "focmp_save_checkbox", real(1.0));
-        g.set(saved, "focmp_secondary", real(1.0));
-        if actions.len()>color_index+2 {
-            let copy=g.arr_get(arr,color_index+2);
-            position_button(g,copy,266.0,265.0,168.0,16.0);
-            g.set(copy,"focmp_secondary",real(1.0));
-            let invite=g.arr_get(arr,color_index+3);
-            position_button(g,invite,184.0,286.0,118.0,28.0);
-        }
-        let color = g.arr_get(arr, color_index);
-        position_button(g, color, 52.0, 265.0, 200.0, 16.0);
-        g.set(color, "focmp_secondary", real(1.0));
-        g.set(color, "focmp_color_button", real(1.0));
-        if name == "page_coop_host" {
-            position_button(g, g.arr_get(arr, 0), 310.0, 286.0, 128.0, 28.0);
-            position_button(g, g.arr_get(arr, 1), 454.0, 286.0, 134.0, 28.0);
-            position_button(g, g.arr_get(arr, 2), 446.0, 265.0, 142.0, 16.0);
-            g.set(g.arr_get(arr, 2), "focmp_secondary", real(1.0));
-            position_button(g, g.arr_get(arr, 3), 52.0, 286.0, 124.0, 28.0);
-        } else {
-            position_button(g, g.arr_get(arr, 0), 454.0, 286.0, 134.0, 28.0);
-            position_button(g, g.arr_get(arr, 1), 52.0, 286.0, 124.0, 28.0);
+        for (i, (role, _, _, x, y, w, h, secondary)) in controls.iter().enumerate() {
+            let item = g.arr_get(arr, i);
+            position_button(g, item, *x, *y, *w, *h);
+            g.set(item, "focmp_role", g.s(role));
+            if *secondary { g.set(item, "focmp_secondary", real(1.0)); }
         }
     }
     mk_page(CONFIRM_PAGE, "START RUN?", &[
@@ -629,33 +704,30 @@ fn refresh_lobby(g: G, c: &mut Coop, pages: V, active: &str) {
     let items = g.get(g.get(pages, active), "items");
     let connected = c.net.as_ref().is_some_and(|n| n.connected() && n.my_id < MAX_PLAYERS as u8);
     let host = c.net.as_ref().is_some_and(|n| n.role == Role::Host);
-    if active!=CONFIRM_PAGE && crate::config::get().transport==crate::config::Transport::Steam {
-        let steam = connected && c.net.as_ref().is_some_and(|n| n.is_steam());
-        action(g,g.arr_get(items,g.arr_len(items)-2),steam,"page_coop_act_copy");
-        action(g,g.arr_get(items,g.arr_len(items)-1),steam,"page_coop_act_invite");
-    }
     if active == CONFIRM_PAGE {
-        action(g, g.arr_get(items, 1), connected && host && c.save_start_error().is_none(), "page_coop_act_force_start");
+        action(g, g.arr_get(items, 1), connected && host && c.start_blocker().is_none(), "page_coop_act_force_start");
         return;
     }
-    let ready = c.net.as_ref().is_some_and(|n| c.ready.get(n.my_id as usize).copied().unwrap_or(false));
-    let ready_item = g.arr_get(items, 0);
-    let text = if ready { "Cancel ready" } else { "Ready" };
-    if g.str_of(&g.get(ready_item, "text")) != text { g.set(ready_item, "text", g.s(text)); }
-    action(g, ready_item, connected, "page_coop_act_ready");
-    let color_index = if active == "page_coop_host" {4} else {2};
-    let saved_item = g.arr_get(items, color_index + 1);
-    action(g, saved_item, connected && host, "page_coop_act_saved");
-    let color_item = g.arr_get(items, color_index);
-    action(g, color_item, connected, "page_coop_act_color");
-    let color = c.net.as_ref().and_then(|n| c.colors.get(n.my_id as usize)).copied().unwrap_or(0);
-    let color_text = format!("Color: {}  >", super::colors::name(color));
-    if g.str_of(&g.get(color_item, "text")) != color_text { g.set(color_item, "text", g.s(&color_text)); }
-    g.set(color_item, "focmp_color", real(super::colors::value(color)));
-    if active == "page_coop_host" {
-        action(g, g.arr_get(items, 1), connected && host && c.everyone_ready() && c.save_start_error().is_none(), "page_coop_act_start");
-        action(g, g.arr_get(items, 2), connected && host && !c.everyone_ready() && c.save_start_error().is_none(), CONFIRM_PAGE);
+    let item = |role: &str| lobby_item(g, items, role);
+    let label = |item: V, text: &str| if g.str_of(&g.get(item, "text")) != text { g.set(item, "text", g.s(text)); };
+    if let (Some(copy), Some(invite)) = (item("copy"), item("invite")) {
+        let steam = connected && c.net.as_ref().is_some_and(|n| n.is_steam());
+        action(g, copy, lobby_code(c).is_some(), "page_coop_act_copy");
+        action(g, invite, steam, "page_coop_act_invite");
     }
+    let ready = c.net.as_ref().is_some_and(|n| c.ready.get(n.my_id as usize).copied().unwrap_or(false));
+    if let Some(ready_item) = item("ready") {
+        label(ready_item, if ready { "Cancel ready" } else { "Ready" });
+        // The host owns the ready votes; it cannot take one while it is away.
+        action(g, ready_item, connected && !c.away(0), "page_coop_act_ready");
+    }
+    if let Some(saved) = item("saved") { action(g, saved, connected && host, "page_coop_act_saved"); }
+    for (role, target) in [("color_prev", "page_coop_act_color_prev"), ("color_next", "page_coop_act_color_next")] {
+        if let Some(arrow) = item(role) { action(g, arrow, connected, target); }
+    }
+    let startable = connected && host && c.start_blocker().is_none();
+    if let Some(start) = item("start") { action(g, start, startable && c.everyone_ready(), "page_coop_act_start"); }
+    if let Some(force) = item("force") { action(g, force, startable && !c.everyone_ready(), CONFIRM_PAGE); }
 }
 
 /// Replace only the lobby page's drawing. The native menu still owns mouse,
@@ -722,17 +794,28 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         text(72.0, 178.0, "Players cannot join once the run starts.", muted);
         if !connected { text(72.0, 210.0, "The lobby is no longer connected.", accent); }
     } else {
-        text(52.0, 54.0, "CO-OP LOBBY", accent);
+        text(MARGIN_X, 54.0, "CO-OP LOBBY", accent);
+        let code = lobby_code(c);
+        if let Some(code) = &code {
+            // Drawn after the menu effects, like the ping column: the menu LUT
+            // turns this gray into plain white.
+            let title = g.call("string_width", &[g.s("CO-OP LOBBY")]).as_f64().unwrap_or(80.0);
+            color_labels.push(ColorLabel { x: MARGIN_X + title + 12.0, y: 54.0, text: code.clone(), color: muted, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 1.0 });
+        }
         let badge = if !connected { "NOT CONNECTED" } else if host { "YOU ARE HOSTING" } else { "JOINED" };
         g.call("draw_set_halign", &[real(2.0)]);
-        text(588.0, 54.0, badge, muted);
+        text(RIGHT_X, 54.0, badge, muted);
         g.call("draw_set_halign", &[real(0.0)]);
+        // A Steam lobby's 18-digit code is shown beside the title, not here:
+        // with "Connected to" in front it ran under the Start from save box.
+        let players = format!("{} of 3 players", roster.len());
         let subtitle = match &c.net {
-            Some(n) if connected && host => format!("{}  /  {} of 3 players", n.addr, roster.len()),
-            Some(n) if connected => format!("Connected to {}  /  {} of 3 players", n.addr, roster.len()),
+            Some(_) if connected && code.is_some() => players,
+            Some(n) if connected && host => format!("{}  /  {players}", n.addr),
+            Some(n) if connected => format!("Connected to {}  /  {players}", n.addr),
             _ => c.status.chars().take(66).collect(),
         };
-        text(52.0, 80.0, &subtitle, muted);
+        text(MARGIN_X, 80.0, &fit(g, &subtitle, SAVE_BOX_X - 10.0 - MARGIN_X), muted);
         text(68.0, 113.0, "PLAYER", muted);
         text(375.0, 113.0, "PING", muted);
         color_labels.push(ColorLabel { x: 407.0, y: 113.0, text: "ms".into(), color: muted, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 0.75 });
@@ -742,7 +825,7 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
             rect(52.0, y - 14.0, 588.0, y + 14.0, rgb(17, 26, 29), false);
             match roster.get(slot) {
                 Some((id, name, me)) => {
-                    let name: String = name.chars().filter(|ch| !ch.is_control() && *ch != '#').take(18).collect();
+                    let name: String = name.chars().filter(|ch| !ch.is_control() && *ch != '#').take(20).collect();
                     color_labels.push(ColorLabel { x: 68.0, y, text: format!("{}  {}", id + 1, name), color: super::colors::value(c.colors[*id as usize]), align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 1.0 });
                     let tag = match (*id == 0, me) { (true, true) => "YOU / HOST", (true, false) => "HOST", (false, true) => "YOU", _ => "" };
                     text(270.0, y, tag, muted);
@@ -769,12 +852,16 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
                         let label = c.save_checkpoints[*id as usize].map_or_else(|| "Save unavailable".into(), |p| p.label());
                         color_labels.push(ColorLabel { x: 68.0, y: y + 13.0, text: label, color: muted, align: 0.0, font: g.get(page, "font_menu"), chip: None, scale: 0.75 });
                     }
-                    text(470.0, y, if c.ready[*id as usize] { "Ready" } else { "Not ready" }, if c.ready[*id as usize] { green } else { muted });
+                    if c.away(*id) { text(470.0, y, "In last run", muted); }
+                    else { text(470.0, y, if c.ready[*id as usize] { "Ready" } else { "Not ready" }, if c.ready[*id as usize] { green } else { muted }); }
                 }
                 None => { text(68.0, y, "Open slot", muted); text(470.0, y, "Waiting", muted); }
             }
         }
+        let away = roster.iter().filter(|(id, _, _)| c.away(*id)).count();
         let message = if let Some(error) = &c.menu.start_error { error.clone() }
+            else if c.away(0) { "Waiting for the host to return to the lobby.".into() }
+            else if away > 0 { format!("Waiting for {away} player{} to return to the lobby.", if away == 1 { "" } else { "s" }) }
             else if let Some(error) = c.save_start_error() { error }
             else if c.saved_run { "Matching saves. Each player keeps their own loadout.".into() }
             else if !connected { "Leave this lobby to host or join another.".into() }
@@ -793,17 +880,21 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
         let secondary = truthy(&g.get(item, "focmp_secondary"));
         let selected = focus == i as i32 && enabled;
         let (x1, y1, x2, y2) = (g.num(item, "x1"), g.num(item, "y1"), g.num(item, "x2"), g.num(item, "y2"));
-        if truthy(&g.get(item, "focmp_save_checkbox")) {
-            if selected { rect(x1 - 3.0, y1, x2, y2, rgb(28, 42, 43), false); }
+        let role = g.get(item, "focmp_role").as_str().unwrap_or_default();
+        if role == "saved" {
+            if selected { rect(x1, y1, x2 + 3.0, y2, rgb(28, 42, 43), false); }
             let color = if enabled { white } else { muted };
             let cy = (y1 + y2) / 2.0;
-            rect(x1, cy - 7.0, x1 + 14.0, cy + 7.0, if enabled { accent } else { muted }, true);
+            let box_x = x2 - 14.0;
+            rect(box_x, cy - 7.0, x2, cy + 7.0, if enabled { accent } else { muted }, true);
             if c.saved_run {
                 g.call("draw_set_color", &[real(if enabled { accent } else { muted })]);
-                g.call("draw_line_width", &[real(x1 + 3.0), real(cy), real(x1 + 6.0), real(cy + 3.0), real(2.0)]);
-                g.call("draw_line_width", &[real(x1 + 6.0), real(cy + 3.0), real(x1 + 12.0), real(cy - 4.0), real(2.0)]);
+                g.call("draw_line_width", &[real(box_x + 3.0), real(cy), real(box_x + 6.0), real(cy + 3.0), real(2.0)]);
+                g.call("draw_line_width", &[real(box_x + 6.0), real(cy + 3.0), real(box_x + 12.0), real(cy - 4.0), real(2.0)]);
             }
-            text(x1 + 22.0, cy, "Start from save", color);
+            g.call("draw_set_halign", &[real(2.0)]);
+            text(box_x - 8.0, cy, "Start from save", color);
+            g.call("draw_set_halign", &[real(0.0)]);
             continue;
         }
         if !secondary {
@@ -811,13 +902,28 @@ fn draw_panel(g: G, page: V, c: &Coop, confirm: bool) {
             rect(x1, y1, x2, y2, if enabled { accent } else { rgb(60, 70, 72) }, true);
         }
         let label = g.str_of(&g.get(item, "text"));
-        if enabled && truthy(&g.get(item, "focmp_color_button")) {
-            color_labels.push(ColorLabel { x: (x1+x2)/2.0, y: (y1+y2)/2.0, text: label, color: g.num(item, "focmp_color"), align: 1.0, font: g.get(page, "font_menu"), chip: Some((x1, (y1+y2)/2.0)), scale: 1.0 });
+        if role == "color_prev" || role == "color_next" {
+            // "<  [swatch] Name  >", flush with the panel's left margin. Arrows,
+            // swatch and name show the real player colour, past the menu LUT.
+            let cx = if role == "color_prev" { MARGIN_X + 2.0 } else { ((x1 + x2) / 2.0).floor() };
+            let cy = ((y1 + y2) / 2.0).floor();
+            let color = c.net.as_ref().and_then(|n| c.colors.get(n.my_id as usize)).copied().unwrap_or(0);
+            let value = if enabled { super::colors::value(color) } else { rgb(92, 104, 105) };
+            if selected { rect(x1, y1, x2, y2, rgb(28, 42, 43), false); }
+            // The menu font's angle brackets are two pixels of chevron. Draw
+            // a solid 5x9 pixel triangle instead, one column at a time.
+            for step in 0..5 {
+                let x = if role == "color_prev" { cx - 2.0 + step as f64 } else { cx + 2.0 - step as f64 };
+                ping_rects.push(PlainRect { x1: x, y1: cy - step as f64, x2: x, y2: cy + step as f64, color: value });
+            }
+            if enabled && role == "color_prev" {
+                color_labels.push(ColorLabel { x: COLOR_NAME_X, y: cy, text: super::colors::name(color).into(), color: value, align: 0.0, font: g.get(page, "font_menu"), chip: Some((COLOR_NAME_X - 14.0, cy)), scale: 1.0 });
+            }
             continue;
         }
         g.call("draw_set_halign", &[real(1.0)]);
         text((x1 + x2) / 2.0, (y1 + y2) / 2.0, &label,
-            if !enabled { rgb(92, 104, 105) } else if selected && !secondary { rgb(8, 14, 17) } else if truthy(&g.get(item, "focmp_color_button")) { g.num(item, "focmp_color") } else if secondary { accent } else { white });
+            if !enabled { rgb(92, 104, 105) } else if selected && !secondary { rgb(8, 14, 17) } else if secondary { accent } else { white });
         g.call("draw_set_halign", &[real(0.0)]);
     }
     for (name, value) in ["draw_set_color", "draw_set_alpha", "draw_set_font", "draw_set_halign", "draw_set_valign"].into_iter().zip(saved) { g.call(name, &[value]); }

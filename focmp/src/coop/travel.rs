@@ -165,7 +165,9 @@ unsafe extern "C-unwind" fn step(s: *mut c_void, o: *mut c_void) {
     let Some(g) = G::new() else { return };
     let Some(player) = (unsafe { g.rt.builtin_var_of("id", s) }) else { return };
     super::boss_contact::apply(g,player,s,o);
-    if super::life::before_step(g,s,o){return;}
+    // Team wipe: the run is over. Only the native Step runs from here on (its
+    // death screen and "restart"); a cleared room must not offer to continue.
+    if super::life::before_step(g,s){unsafe { f(s, o) }; return;}
     super::projectiles::replay(g, s);
     PLAYER_PTR.store(s as usize, Ordering::Relaxed);
     PLAYER_KEY.store(key(&player), Ordering::Relaxed);

@@ -2,7 +2,7 @@
 
 # FOCMP
 
-FOCMP adds three-player online co-op to [Flashes of Chaos](https://store.steampowered.com/app/3399100/) through Steam lobbies. It runs on Windows and on Linux or Steam Deck through Proton. The latest supported game version is **v1.0.03**.
+FOCMP adds three-player online co-op to [Flashes of Chaos](https://store.steampowered.com/app/3399100/) through Steam lobbies. It runs on Windows and on Linux or Steam Deck through Proton. The latest supported game version is the **v1.0.03 hotfix**.
 
 FOCMP doesn't include the game: you need your own copy of Flashes of Chaos on Steam to use it.
 
@@ -27,11 +27,11 @@ If you'd rather install by hand, copy the DLLs and `focmp.ini` from the release 
 
 ## Play
 
-Open **COOP**, choose **Host** and invite your friends. Everyone needs their own copy of the game, matching game and FOCMP versions, and has to join before the run starts.
+Open **COOP**, choose **Host** and invite your friends. Everyone needs their own copy of the game, matching game and FOCMP versions, and has to join before the run starts. If the whole team goes down, dismissing the death screen brings everyone back to the same lobby for another run.
 
-To resume saved characters, the host turns on **Start from save** in the lobby. Each player loads their own guns, cards, perks and health. The lobby shows saved levels and requires matching level, sublevel, completed-stage count and difficulty before starting, including **Start anyway**. Changing the toggle clears ready votes. A missing or finished save blocks the start; turn the toggle off to start a new run.
+A co-op run is saved the way a single-player run is: the game's autosave keeps one save per player, your modded save, so starting a new co-op run replaces the run that was in it. To pick a run up again, the host turns on **Start from save** in the lobby. Each player loads their own guns, cards, perks and health. The lobby shows saved levels and requires matching level, sublevel, completed-stage count and difficulty before starting, including **Start anyway**. Changing the toggle clears ready votes. A missing or finished save blocks the start; turn the toggle off to start a new run. As in single player, a team wipe ends the save.
 
-Saved-game starts use a copy of each player's modded save (or their single-player save if no modded save exists). All co-op autosaves go to a new `coop_runs/<session>/savefile.json` under the modded save directory; existing saves are never overwritten. The host supplies shared stage targets and boss conditions, and the normal co-op shared economy still applies.
+A player with no modded save starts from a copy of their single-player save; single-player saves themselves are never written. The host supplies shared stage targets and boss conditions, and the normal co-op shared economy still applies.
 
 Mod settings live in `focmp.ini` in the game folder. Modded saves are kept apart from your normal ones.
 

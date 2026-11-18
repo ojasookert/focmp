@@ -1,16 +1,23 @@
 //! Real native player artwork/animation. YYC Draw selects its leg sprites in
 //! local variables; capture its actual draw output instead of guessing fields.
 use crate::engine::{G, V, asset_id, boolean, real, truthy};
-use crate::net::AvatarPart;
+use crate::net::{AvatarPart, ReloadText};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 static GUN_DRAW: AtomicUsize = AtomicUsize::new(0);
 static GUN_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GUN_FRAME: LazyLock<Mutex<Vec<AvatarPart>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static GUN_SNAPSHOT: LazyLock<Mutex<Vec<AvatarPart>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 static REMOTE_GUNS: LazyLock<Mutex<Vec<Vec<AvatarPart>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+// objGun Draw prints its "RELOADING" label with a built-in text call, which the
+// sprite capture above never sees. Replicate that one call for teammates.
+static TEXT: AtomicUsize = AtomicUsize::new(0);
+static GUN_TEXT_FRAME: Mutex<Option<ReloadText>> = Mutex::new(None);
+static GUN_TEXT_SNAPSHOT: Mutex<Option<(Instant, ReloadText)>> = Mutex::new(None);
+static REMOTE_GUN_TEXTS: Mutex<Vec<ReloadText>> = Mutex::new(Vec::new());
 static DRAW: AtomicUsize = AtomicUsize::new(0);
 static SPRITE: AtomicUsize = AtomicUsize::new(0);
 static SIMPLE: AtomicUsize = AtomicUsize::new(0);
@@ -62,6 +69,9 @@ pub fn install(g: G) {
             }
         }
     }
+    match crate::hooks::install(g.rt, "draw_text_transformed_color", gun_text as *const ()) {
+        Ok(p)=>TEXT.store(p as usize,Ordering::SeqCst),Err(e)=>crate::log(&e),
+    }
     match crate::hooks::install(g.rt, "gml_Object_objGun_Draw_0", gun_draw as *const ()) {
         Ok(p)=>GUN_DRAW.store(p as usize,Ordering::SeqCst),Err(e)=>crate::log(&e),
     }
@@ -71,6 +81,24 @@ pub fn install(g: G) {
     }
 }
 pub fn weapon_snapshot()->Vec<AvatarPart>{GUN_SNAPSHOT.lock().unwrap().clone()}
+/// The label from the latest local gun draw. A gun that stopped drawing (dead,
+/// hidden, another room) must not leave a stale label on teammates' screens.
+pub fn reload_text_snapshot()->Option<ReloadText>{
+    GUN_TEXT_SNAPSHOT.lock().unwrap().as_ref().filter(|(at,_)|at.elapsed()<Duration::from_millis(250)).map(|(_,text)|text.clone())
+}
+/// A peer names the font its label used. Resolve at most a handful of names,
+/// so a hostile stream of made-up names cannot grow a cache without bound.
+fn label_font(g:G,name:&str)->Option<V>{
+    static FONTS:Mutex<Vec<(String,Option<V>)>>=Mutex::new(Vec::new());
+    if name.is_empty(){return None;}
+    let mut fonts=FONTS.lock().unwrap();
+    if let Some((_,font))=fonts.iter().find(|(known,_)|known==name){return *font;}
+    if fonts.len()>=8{return None;}
+    let font=g.call("asset_get_index",&[g.s(name)]);
+    let font=(font.as_f64().is_none_or(|v|v>=0.0)&&truthy(&g.call("font_exists",&[font]))).then_some(font);
+    fonts.push((name.to_owned(),font));
+    font
+}
 pub fn snapshot() -> Vec<AvatarPart> {
     SNAPSHOT.lock().unwrap().clone()
 }
@@ -91,6 +119,8 @@ pub fn tick(c: &super::Coop) {
         parts.extend(s.weapon.iter().filter(|p|!p.sprite.starts_with("s_gun_")).cloned());
         parts
     })).collect();
+    *REMOTE_GUN_TEXTS.lock().unwrap()=c.remotes.values().filter(|r|r.seen.elapsed().as_secs()<3)
+        .filter_map(|r|r.state.as_ref().filter(|s|&s.room==room&&!s.dead).and_then(|s|s.gun_reload_text.clone())).collect();
     *REMOTES.lock().unwrap() = c
         .remotes
         .iter()
@@ -108,10 +138,11 @@ unsafe extern "C-unwind" fn gun_draw(s:*mut c_void,o:*mut c_void){
     let local=super::rooms::RUN_SEED.load(Ordering::Relaxed)!=0 && G::new().is_some_and(|g|{
         unsafe{g.rt.builtin_var_of("id",s)}.is_some_and(|gun|g.first("objPlayer").is_some_and(|p|crate::engine::key(&p)==crate::engine::key(&g.get(gun,"Owner"))))
     });
-    if local{GUN_FRAME.lock().unwrap().clear();GUN_ACTIVE.store(true,Ordering::Relaxed);}
+    if local{GUN_FRAME.lock().unwrap().clear();*GUN_TEXT_FRAME.lock().unwrap()=None;GUN_ACTIVE.store(true,Ordering::Relaxed);}
     unsafe{original(s,o)};
     if local{
         GUN_ACTIVE.store(false,Ordering::Relaxed);*GUN_SNAPSHOT.lock().unwrap()=GUN_FRAME.lock().unwrap().clone();
+        *GUN_TEXT_SNAPSHOT.lock().unwrap()=GUN_TEXT_FRAME.lock().unwrap().take().map(|text|(Instant::now(),text));
         // Draw once in the native weapon pass, using the remote weapon's own
         // sprite and pose. Never depend on the local weapon's sprite calls.
         if let Some(g)=G::new(){
@@ -119,8 +150,45 @@ unsafe extern "C-unwind" fn gun_draw(s:*mut c_void,o:*mut c_void){
             for parts in REMOTE_GUNS.lock().unwrap().clone(){for p in parts{
                 unsafe{draw(s,asset_id(g.asset(&p.sprite)),p.frame,p.x,p.y,p.xs,p.ys,p.angle,p.blend,p.alpha)};
             }}
+            // Native guns set no font or alignment for this label: it inherits
+            // whatever the previous drawer left behind. Use the sender's state.
+            let address=TEXT.load(Ordering::Relaxed);
+            let label=unsafe{g.rt.builtin_var_of("id",s)}.map(|gun|g.get(gun,"txt_reloading"));
+            let texts=REMOTE_GUN_TEXTS.lock().unwrap().clone();
+            if let (true,false,Some(label))=(address!=0,texts.is_empty(),label.filter(|v|v.as_str().is_some())){
+                let text:crate::gm::BuiltinFn=unsafe{std::mem::transmute(address)};
+                let state=["draw_get_font","draw_get_halign","draw_get_valign"].map(|name|g.call(name,&[]));
+                for t in texts{
+                    if let Some(font)=label_font(g,&t.font){g.call("draw_set_font",&[font]);}
+                    g.call("draw_set_halign",&[real(t.halign as f64)]);g.call("draw_set_valign",&[real(t.valign as f64)]);
+                    let mut args=[real(t.x as f64),real(t.y as f64),label,real(t.xs as f64),real(t.ys as f64),real(t.angle as f64),
+                        real(t.colors[0] as f64),real(t.colors[1] as f64),real(t.colors[2] as f64),real(t.colors[3] as f64),real(t.alpha as f64)];
+                    let mut result=V::undefined();
+                    unsafe{text(&mut result,s,o,args.len() as i32,args.as_mut_ptr())};
+                }
+                for (name,value) in ["draw_set_font","draw_set_halign","draw_set_valign"].into_iter().zip(state){g.call(name,&[value]);}
+            }
         }
     }
+}
+unsafe extern "C-unwind" fn gun_text(r:*mut V,s:*mut c_void,o:*mut c_void,n:i32,a:*mut V){
+    let original:crate::gm::BuiltinFn=unsafe{std::mem::transmute(TEXT.load(Ordering::Relaxed))};
+    // draw_text_transformed_color(x, y, string, xscale, yscale, angle, c1, c2, c3, c4, alpha)
+    if GUN_ACTIVE.load(Ordering::Relaxed)&&n==11&&!a.is_null(){
+        let args=unsafe{std::slice::from_raw_parts(a,11)};
+        let number=|i:usize|args[i].as_f64().unwrap_or(0.0);
+        if let Some(g)=G::new(){
+            let align=|name:&str|g.call(name,&[]).as_f64().filter(|v|(0.0..=2.0).contains(v)).unwrap_or(0.0) as u8;
+            let font=g.call("draw_get_font",&[]);
+            let font=if font.as_f64().is_none_or(|v|v>=0.0)&&truthy(&g.call("font_exists",&[font])){g.str_of(&g.call("font_get_name",&[font]))}else{String::new()};
+            *GUN_TEXT_FRAME.lock().unwrap()=Some(ReloadText{
+                x:number(0) as f32,y:number(1) as f32,xs:number(3) as f32,ys:number(4) as f32,angle:number(5) as f32,
+                colors:[6,7,8,9].map(|i|number(i) as u32&0xff_ffff),alpha:number(10) as f32,
+                halign:align("draw_get_halign"),valign:align("draw_get_valign"),font,
+            });
+        }
+    }
+    unsafe{original(r,s,o,n,a)}
 }
 unsafe extern "C-unwind" fn draw(s: *mut c_void, o: *mut c_void) {
     let f: Event = unsafe { std::mem::transmute(DRAW.load(Ordering::Relaxed)) };
@@ -358,7 +426,7 @@ fn tinted(g: G, context: *mut c_void, original: V, color: u8) -> V {
 pub fn describe() -> String {
     let sheets = CACHE.lock().unwrap().len();
     format!(
-        "native avatar: {} parts, {} colored sprite sheets, sprites {:?}, sheets {:?}; held weapon draws {:?}",
+        "native avatar: {} parts, {} colored sprite sheets, sprites {:?}, sheets {:?}; held weapon draws {:?}; reload label {:?}; remote reload labels {:?}",
         snapshot().len(),
         sheets,
         snapshot().iter().map(|p| p.sprite.clone()).collect::<Vec<_>>(),
@@ -368,6 +436,8 @@ pub fn describe() -> String {
             .iter()
             .map(|((sp, c), v)| (*sp, *c, asset_id(*v)))
             .collect::<Vec<_>>(),
-        weapon_snapshot().iter().map(|p|(&p.sprite,p.x,p.y)).collect::<Vec<_>>()
+        weapon_snapshot().iter().map(|p|(&p.sprite,p.x,p.y)).collect::<Vec<_>>(),
+        reload_text_snapshot(),
+        REMOTE_GUN_TEXTS.lock().unwrap().clone()
     )
 }

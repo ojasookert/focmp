@@ -1,4 +1,5 @@
 //! Keep a downed player in the session; only the host may end the team run.
+//! A team wipe then hands every player back to the native death screen.
 use crate::{
     engine::{G, V, boolean, real, truthy},
     hooks::ScriptFn,
@@ -62,6 +63,10 @@ pub fn reset() {
 }
 pub fn ending() -> bool {
     GAME_OVER.load(Ordering::Relaxed)
+}
+/// The local player is down while the team plays on.
+pub fn downed() -> bool {
+    DOWN.load(Ordering::Relaxed) && !ending()
 }
 pub fn game_over() {
     GAME_OVER.store(true, Ordering::Relaxed);
@@ -174,15 +179,32 @@ unsafe extern "C-unwind" fn room(s: *mut c_void, o: *mut c_void) {
         }
     }
 }
-pub fn before_step(g: G, s: *mut c_void, o: *mut c_void) -> bool {
+pub fn before_step(g: G, s: *mut c_void) -> bool {
     if !active() {
         return false;
     }
     if GAME_OVER.load(Ordering::Relaxed) {
+        // Team wipe: this is now an ordinary native death. Native Player.Step
+        // and Draw GUI own the "DEATH / press Confirm to restart" screen and
+        // leave through dead_end_room themselves; each player dismisses their
+        // own. Only undo the spectator camera, once.
         if !ENDED.swap(true, Ordering::Relaxed) {
-            let f: ScriptFn = unsafe { std::mem::transmute(END.load(Ordering::Relaxed)) };
-            let mut r = V::undefined();
-            unsafe { f(s, o, &mut r, 0, std::ptr::null_mut()) };
+            *SPECTATING.lock().unwrap() = None;
+            if let (Some(p), Some(cam)) = (unsafe { g.rt.builtin_var_of("id", s) }, g.first("objCamera")) {
+                g.set(cam, "follow", p);
+                g.set(cam, "desaturate", boolean(true));
+            }
+            // A native death silences the fight music. Each player's own death
+            // kept it playing for the team (music_stop above); stop it now.
+            if let Some(music) = g.first("objMusic") {
+                let stop = g.get(music, "music_stop");
+                if truthy(&g.call("is_method", &[stop])) {
+                    g.call("method_call", &[stop, g.call("array_create", &[real(0.0)])]);
+                }
+            }
+            // The run is over for good: record it as a death, like a native one.
+            crate::saves::save_dead(g);
+            crate::log("life: team wipe, native death screen");
         }
         return true;
     }
@@ -267,7 +289,8 @@ unsafe extern "C-unwind" fn hud(s: *mut c_void, o: *mut c_void) {
     };
     let dead = unsafe { g.rt.builtin_var_of("id", s) }
         .is_some_and(|p| truthy(&g.get(p, "dead")) && !truthy(&g.get(p, "revive")));
-    if !dead {
+    // Once the whole team is down the native death screen is the right one.
+    if !dead || ending() {
         unsafe { f(s, o) };
         return;
     }

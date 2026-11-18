@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u32 = 36;
+pub const PROTOCOL: u32 = 37;
 pub const MAX_PLAYERS: usize = 3;
 pub const DEFAULT_PORT: u16 = 47900;
 const MAX_FRAME: u32 = 1 << 20;
@@ -38,6 +38,21 @@ pub struct AvatarPart {
 }
 impl AvatarPart {
     fn sane(&self)->bool{self.sprite.len()<128&&self.sprite.starts_with("s_")&&self.pass<8&&[self.frame,self.x,self.y,self.xs,self.ys,self.angle,self.alpha].iter().all(|x|x.is_finite()&&x.abs()<1.0e7)}
+}
+
+/// The native "RELOADING" label a gun draws beside itself (objGun Draw). The
+/// receiver supplies its own localized string. Font and alignment travel with
+/// it: the native draw sets neither, and that leftover state differs per machine.
+#[derive(Encode,Decode,Clone,Debug,Default,PartialEq)]
+pub struct ReloadText {
+    pub x:f32,pub y:f32,pub xs:f32,pub ys:f32,pub angle:f32,pub colors:[u32;4],pub alpha:f32,
+    pub halign:u8,pub valign:u8,pub font:String,
+}
+impl ReloadText {
+    fn sane(&self)->bool{
+        [self.x,self.y,self.xs,self.ys,self.angle,self.alpha].iter().all(|x|x.is_finite()&&x.abs()<1.0e7)&&self.colors.iter().all(|c|*c<=0xff_ffff)
+            &&self.halign<=2&&self.valign<=2&&self.font.len()<=48&&self.font.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_')
+    }
 }
 
 /// What a player looks like right now (sent ~60 Hz).
@@ -68,6 +83,7 @@ pub struct PlayerState {
     pub gun_alpha:f32,
     pub gun_depth: f32,
     pub gun_reloading: bool,
+    pub gun_reload_text: Option<ReloadText>,
     pub hp: f32,
     pub hp_max: f32,
     pub dead: bool,
@@ -85,7 +101,7 @@ impl PlayerState {
             self.gun_yscale, self.gun_xscale, self.gun_alpha, self.gun_depth, self.hp, self.hp_max,
         ];
         let strs = [&self.room, &self.body_sprite, &self.legs_sprite, &self.gun_sprite];
-        self.avatar.len()<=32 && self.avatar.iter().all(AvatarPart::sane) && self.weapon.len()<=32 && self.weapon.iter().all(AvatarPart::sane) && self.lights.len()<=6 && self.lights.iter().all(crate::coop::lights::Light::sane) && nums.iter().all(|v| v.is_finite() && v.abs() < 1.0e7)
+        self.avatar.len()<=32 && self.avatar.iter().all(AvatarPart::sane) && self.weapon.len()<=32 && self.weapon.iter().all(AvatarPart::sane) && self.lights.len()<=6 && self.lights.iter().all(crate::coop::lights::Light::sane) && self.gun_reload_text.as_ref().is_none_or(ReloadText::sane) && nums.iter().all(|v| v.is_finite() && v.abs() < 1.0e7)
             && strs.iter().all(|s| s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
     }
 }
@@ -691,6 +707,13 @@ impl Net {
         let peers=a.peers.clone();drop(a);
         if let Some(steam)=&self.steam{steam.lock().unwrap().begin_run();}
         Ok(peers)
+    }
+
+    /// Host: the run ended and the same session is back in its lobby. Admit
+    /// players again and let a new run start.
+    pub fn end_run(&self) {
+        self.admission.lock().unwrap().running = false;
+        if let Some(steam)=&self.steam{steam.lock().unwrap().end_run();}
     }
 
     pub fn connected(&self) -> bool {

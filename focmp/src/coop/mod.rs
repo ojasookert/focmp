@@ -49,6 +49,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// The whole team is down: the run has ended (for code outside this module).
+pub fn team_wiped() -> bool { life::ending() }
+/// The local player is down but the team is still playing.
+pub fn downed() -> bool { life::downed() }
+
 /// Local peer id for code that can't take the COOP lock (GML hooks).
 pub static MY_ID: AtomicU8 = AtomicU8::new(0);
 
@@ -195,6 +200,69 @@ impl Coop {
         MY_ID.store(0, Ordering::Relaxed);
     }
 
+    /// After a team wipe the death screen's "restart" leads back to the lobby
+    /// of the same session, so the team can start again without re-hosting and
+    /// re-joining. Clear everything that belonged to the run; keep the
+    /// connection, the roster and the chosen colours.
+    fn return_to_lobby(&mut self, g: G) {
+        let Some(role) = self.net.as_ref().map(|n| n.role) else { return };
+        self.ending = ending::Ending::default();
+        boss_contact::reset();
+        props::reset();
+        self.pedestal.reset(g);
+        self.ai.reset(g);
+        self.ghosts.clear(g);
+        rooms::RUN_SEED.store(0, Ordering::Relaxed);
+        enemies::PUPPET_MODE.store(false, Ordering::Relaxed);
+        self.enemies.reset();
+        self.my_layout = None;
+        self.ready = [false; crate::net::MAX_PLAYERS];
+        self.saved_run = false;
+        self.saved_local = None;
+        self.save_checkpoints = [None; crate::net::MAX_PLAYERS];
+        self.menu.start_error = None;
+        self.difficulty = difficulty::Difficulty::default();
+        self.cursors = cursors::Cursors::default();
+        self.selection = selection::Selection::default();
+        self.computer = computer::Computer::default();
+        self.travel = travel::Travel::default();
+        self.projectiles.clear(g);
+        economy::reset(g);
+        life::reset();
+        for remote in self.remotes.values_mut() {
+            remote.state = None;
+            remote.layout = None;
+            remote.busy = false;
+        }
+        self.lobby_sent = None;
+        self.sent_gone = false; // announce the menu room, so peers see us back
+        self.room = g.room_name();
+        self.room_frames = 0;
+        if role == Role::Host {
+            // Ready votes from before the run must not count for the next one.
+            self.lobby_revision = self.lobby_revision.wrapping_add(1);
+            if let Some(n) = &self.net { n.end_run(); }
+        }
+        self.menu.resume_lobby(role == Role::Host);
+        crate::log("coop: run over, back to the lobby");
+    }
+
+    /// A player still on the previous run's death screen: connected, but not
+    /// back in the lobby yet. Rooms come from each peer's own ticks.
+    pub fn away(&self, id: PeerId) -> bool {
+        self.net.as_ref().is_some_and(|n| id != n.my_id)
+            && self.remotes.get(&id).is_some_and(|r| !r.room.is_empty() && r.room != "Room_main_menu")
+    }
+
+    /// Why the host cannot start a run right now, if anything.
+    pub fn start_blocker(&self) -> Option<String> {
+        let n = self.net.as_ref()?;
+        if n.peers.iter().any(|p| self.away(p.id)) {
+            return Some("Waiting for everyone to return to the lobby".into());
+        }
+        self.save_start_error()
+    }
+
     /// Everyone in the session including us: (id, name, is_me).
     pub fn roster(&self) -> Vec<(PeerId, String, bool)> {
         let Some(n) = &self.net else { return vec![] };
@@ -264,6 +332,8 @@ impl Coop {
                         Msg::PropInteract{committed,action} => props::receive_interact(g,self,from,committed,action),
                         Msg::PropHit{committed,hit} => props::receive(g,from,committed,hit),
                         Msg::Tick(t) => {
+                            // A player back from the last run can vote again: send the lobby now.
+                            if role==Role::Host && r.room!=t.room && t.room=="Room_main_menu" {self.lobby_sent=None;}
                             r.room=t.room.clone();r.busy=t.busy;
                             if from==0 {if let Some(s)=t.objective {objective::apply(g,s);} if let Some(s)=t.props {props::apply(g,s);} if let Some(b)=t.boss{rooms::apply_boss(g,b);}if let Some(state)=t.economy {economy::apply(g,state);}}
                             if let Some(d) = t.projectiles { self.projectiles.receive(g, from, d); }
@@ -342,8 +412,10 @@ impl Coop {
                                 self.lobby_sent = None;
                             }
                         }
-                        Msg::Lobby { ready, colors, ping_ms, saved, revision, saves, .. } => {
-                            if from == 0 && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
+                        Msg::Lobby { ready, colors, ping_ms, saved, revision, saves, running } => {
+                            // A host still on the last run's death screen keeps
+                            // sending that run's lobby; it is stale until it returns.
+                            if from == 0 && !running && rooms::RUN_SEED.load(Ordering::Relaxed) == 0 {
                                 let changed = self.saved_run != saved || self.lobby_revision != revision;
                                 self.ready = ready; self.colors = colors; self.latency.ms = ping_ms;
                                 self.saved_run = saved; self.lobby_revision = revision; self.save_checkpoints = saves;
@@ -429,10 +501,12 @@ impl Coop {
         None
     }
 
-    pub fn cycle_color(&mut self) {
+    /// Step the local player's colour through the palette; `forward` picks the direction.
+    pub fn cycle_color(&mut self, forward: bool) {
         let Some(n) = &self.net else { return };
         if !n.connected() || n.my_id as usize >= self.colors.len() || rooms::RUN_SEED.load(Ordering::Relaxed) != 0 { return; }
-        let next = (self.colors[n.my_id as usize] + 1) % colors::PALETTE.len() as u8;
+        let count = colors::PALETTE.len() as u8;
+        let next = (self.colors[n.my_id as usize] % count + if forward { 1 } else { count - 1 }) % count;
         if n.role == Role::Host {
             self.colors[n.my_id as usize] = next;
             self.lobby_sent = None;
@@ -572,7 +646,7 @@ pub fn start_run_local(seed: u64, saved: Option<(&crate::saves::Prepared, &crate
 /// Host: pick a run seed, tell everyone, start locally.
 pub fn host_start_run(c: &mut Coop, force: bool) -> String {
     if rooms::RUN_SEED.load(Ordering::Relaxed) != 0 { return "run already started".into(); }
-    if let Some(error) = c.save_start_error() { return error; }
+    if let Some(error) = c.start_blocker() { return error; }
     let Some(n) = &mut c.net else { return "not in a session".into() };
     if n.role != Role::Host {
         return "only the host can start the run".into();
@@ -596,7 +670,7 @@ pub fn host_start_run(c: &mut Coop, force: bool) -> String {
     // join between the ready check and StartRun and miss the message.
     match n.begin_run(force, &c.ready, c.saved_run.then_some(&c.save_checkpoints)) {
         Ok(peers) => n.peers = peers,
-        Err(e) => { crate::saves::clear_run_file(); return e; },
+        Err(e) => return e,
     }
     let mut rules = crate::config::get().rules;
     rules.players = n.peers.len() as u8;
@@ -622,6 +696,7 @@ pub fn capture_local(g: G) -> Option<PlayerState> {
     let mut s = PlayerState {
         avatar: avatars::snapshot(),
         weapon: avatars::weapon_snapshot(),
+        gun_reload_text: avatars::reload_text_snapshot(),
         lights: lights::capture(g,p),
         room: g.room_name(),
         x: f("x"),
@@ -696,7 +771,10 @@ pub fn frame() {
     // Native objMenu may persist across rooms: cleanup must follow the room
     // transition, not a change of menu instance identity.
     if rooms::RUN_SEED.load(Ordering::Relaxed)!=0 && g.room_name()=="Room_main_menu"
-        && !c.room.is_empty() && c.room!="Room_main_menu" && !c.ending.extracting() {c.leave(g);}
+        && !c.room.is_empty() && c.room!="Room_main_menu" && !c.ending.extracting() {
+        // A wiped team keeps its session; any other way out of a run ends it.
+        if life::ending() && c.net.as_ref().is_some_and(|n| n.connected()) { c.return_to_lobby(g); } else { c.leave(g); }
+    }
     // Discard old-room puppets and queued attacks before consuming new packets.
     if g.room_name() != c.room {
         c.enemies.reset();

@@ -1,4 +1,5 @@
-//! Compact teammate health below the native player HUD. Uses existing snapshots.
+//! Compact teammate health below the native player HUD and its objective line.
+//! Uses existing snapshots.
 use crate::engine::{G, V, real, truthy};
 use std::ffi::c_void;
 use std::sync::{
@@ -9,7 +10,29 @@ use std::sync::{
 static UI_END: AtomicUsize = AtomicUsize::new(0);
 static SURFACE: AtomicUsize = AtomicUsize::new(0);
 static COMPOSITING: AtomicBool = AtomicBool::new(false);
-static ROWS: Mutex<Option<(f64, Vec<u8>)>> = Mutex::new(None);
+static ROWS: Mutex<Option<Rows>> = Mutex::new(None);
+#[derive(Clone)]
+struct Rows { frame: f64, colors: Vec<u8>, top: f64, right: f64 }
+// Native lines under the local health bar: the objective ("OBJECTIVE: DEFEND
+// CENTER", objDefendArea Draw GUI, y 32..43) and the boss conditions
+// (objBossText Draw GUI, one 16 px line each from boss_text_y_start = 32).
+// Teammate rows always start below the objective and a single boss line, so
+// the HUD sits in one place; only a taller native stack pushes it further.
+const ROWS_TOP: f64 = 50.0;
+const BOSS_LINE: f64 = 16.0;
+fn rows_top(g: G) -> f64 {
+    let Some(boss) = g.first("objBossText") else { return ROWS_TOP };
+    let lines = g.arr_len(g.get(boss, "boss_icon_indexes")).min(4) as f64;
+    if lines == 0.0 { return ROWS_TOP; }
+    let start = g.get(boss, "boss_text_y_start").as_f64().filter(|y| (0.0..200.0).contains(y)).unwrap_or(32.0);
+    ROWS_TOP.max(start + BOSS_LINE * lines + 2.0)
+}
+const ROW_HEIGHT: f64 = 20.0;
+const TINT_LEFT: f64 = 8.0;
+const TINT_RIGHT: f64 = 136.0;
+const BAR_TEXT_LEFT: f64 = 60.0;
+// Steam names run to 32 characters; show 20 before cutting.
+const NAME_CHARS: usize = 20;
 
 pub fn install(g: G) {
     for (name, hook, slot) in [
@@ -81,16 +104,21 @@ pub unsafe fn draw(g: G, c: &super::Coop, caller: *mut c_void, other: *mut c_voi
     g.call("draw_set_valign", &[real(1.0)]);
     g.call("draw_set_alpha", &[real(1.0)]);
 
+    let mut tint_right = TINT_RIGHT;
+    let top = rows_top(g);
     for (row, peer) in peers.iter().enumerate() {
         let x = 10.0;
-        let y = 30.0 + row as f64 * 20.0;
+        let y = top + 6.0 + row as f64 * ROW_HEIGHT;
         let scale = 0.75;
         let name: String = peer
             .name
             .chars()
             .filter(|ch| !ch.is_control() && *ch != '#')
-            .take(12)
+            .take(NAME_CHARS)
             .collect();
+        // A long name runs past the bar; widen the player-colour pass to match.
+        let width = g.call("string_width", &[g.s(&name)]).as_f64().unwrap_or(0.0) * scale;
+        tint_right = tint_right.max((x + width + 2.0).ceil()).min(640.0);
         let remote = c.remotes.get(&peer.id);
         let fresh = remote.is_some_and(|r| r.seen.elapsed().as_secs_f32() < 3.0);
         let state = remote.filter(|_| fresh).and_then(|r| r.state.as_ref());
@@ -147,10 +175,12 @@ pub unsafe fn draw(g: G, c: &super::Coop, caller: *mut c_void, other: *mut c_voi
         g.call(name, &[value]);
     }
     g.call("surface_reset_target", &[]);
-    *ROWS.lock().unwrap() = Some((
-        g.num(ui, "frame"),
-        peers.iter().map(|p| c.colors[p.id as usize]).collect(),
-    ));
+    *ROWS.lock().unwrap() = Some(Rows {
+        frame: g.num(ui, "frame"),
+        colors: peers.iter().map(|p| c.colors[p.id as usize]).collect(),
+        top,
+        right: tint_right,
+    });
 }
 
 unsafe extern "C-unwind" fn ui_end(s: *mut c_void, o: *mut c_void) {
@@ -203,7 +233,7 @@ unsafe extern "C-unwind" fn composite(
 }
 
 unsafe fn colored_surface(g: G, s: *mut c_void, o: *mut c_void, a: &[V]) -> bool {
-    let Some((frame, colors)) = ROWS.lock().unwrap().clone() else {
+    let Some(Rows { frame, colors, top: rows_top, right }) = ROWS.lock().unwrap().clone() else {
         return false;
     };
     let Some(ui) = g.first("objUI") else {
@@ -270,10 +300,12 @@ unsafe fn colored_surface(g: G, s: *mut c_void, o: *mut c_void, a: &[V]) -> bool
             part(&mut result, s, o, args.len() as i32, args.as_mut_ptr());
         }
     };
-    let bottom = 24.0 + colors.len() as f64 * 20.0;
-    draw_part(0.0, 0.0, 640.0, 24.0);
-    draw_part(0.0, 24.0, 8.0, bottom);
-    draw_part(136.0, 24.0, 640.0, bottom);
+    let bottom = rows_top + colors.len() as f64 * ROW_HEIGHT;
+    draw_part(0.0, 0.0, 640.0, rows_top);
+    draw_part(0.0, rows_top, TINT_LEFT, bottom);
+    if right < 640.0 {
+        draw_part(right, rows_top, 640.0, bottom);
+    }
     draw_part(0.0, bottom, 640.0, 360.0);
     g.call("shader_set", &[grading]);
     for effect in [
@@ -299,7 +331,7 @@ unsafe fn colored_surface(g: G, s: *mut c_void, o: *mut c_void, a: &[V]) -> bool
     uniform("u_channel_mixer_enable", &[real(1.0)]);
     for (row, color) in colors.iter().enumerate() {
         let (r, green, b) = super::colors::PALETTE[*color as usize % 8].1;
-        let top = 24.0 + row as f64 * 20.0;
+        let top = rows_top + row as f64 * ROW_HEIGHT;
         // Native text has a pink face and a white offset underneath. Map its
         // red/green contrast to the player tint, preserving neutral highlights
         // as white instead of tinting the shadow along with the foreground.
@@ -315,10 +347,10 @@ unsafe fn colored_surface(g: G, s: *mut c_void, o: *mut c_void, a: &[V]) -> bool
                 uniform(&format!("u_channel_mixer_{name}"), &weights.map(real));
             }
             if bright {
-                draw_part(8.0, top, 136.0, top + 10.0);
-                draw_part(60.0, top + 10.0, 136.0, top + 20.0);
+                draw_part(TINT_LEFT, top, right, top + 10.0);
+                draw_part(BAR_TEXT_LEFT, top + 10.0, right, top + ROW_HEIGHT);
             } else {
-                draw_part(8.0, top + 10.0, 60.0, top + 20.0);
+                draw_part(TINT_LEFT, top + 10.0, BAR_TEXT_LEFT, top + ROW_HEIGHT);
             }
         }
     }
